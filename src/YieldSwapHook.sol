@@ -190,16 +190,11 @@ contract YieldSwapHook is BaseHook {
         PoolKey calldata key,
         uint160
     ) internal override returns (bytes4) {
-        uint256 rateScalar;
-        int256 rateAnchor;
-        uint256 initialSY;
-        uint256 initialPT;
-        
-        // Use default values
-        rateScalar = DEFAULT_RATE_SCALAR;
-        rateAnchor = DEFAULT_RATE_ANCHOR;
-        initialSY = 0;
-        initialPT = 0;
+        // Use default values but ensure we have some minimal reserves to prevent math errors
+        uint256 rateScalar = DEFAULT_RATE_SCALAR;
+        int256 rateAnchor = DEFAULT_RATE_ANCHOR;
+        uint256 initialSY = 1e9; // Small non-zero value to prevent division by zero
+        uint256 initialPT = 1e9; // Small non-zero value to prevent division by zero
         
         // Store parameters
         poolParams[key.toId()] = PoolParameters({
@@ -395,6 +390,9 @@ contract YieldSwapHook is BaseHook {
         
         // Calculate current portion_PT
         uint256 totalReserve = reserveSY + reservePT;
+        // Prevent division by zero
+        if (totalReserve == 0) return 0;
+        
         uint256 portionPTBefore = (reservePT * 1e18) / totalReserve;
         
         // Calculate Price_SY_Before
@@ -410,6 +408,9 @@ contract YieldSwapHook is BaseHook {
             : 0;
             
         uint256 totalReserveAfter = reserveSYAfter + reservePTAfter;
+        // Prevent division by zero
+        if (totalReserveAfter == 0) return 0;
+        
         uint256 portionPTAfter = (reservePTAfter * 1e18) / totalReserveAfter;
         
         // Calculate Price_SY_After
