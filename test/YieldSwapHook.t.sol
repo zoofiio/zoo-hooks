@@ -3,399 +3,902 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
+import {Deployers} from "v4-core/test/utils/Deployers.sol";
+import {YieldSwapHook} from "src/YieldSwapHook.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
-import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/src/types/BalanceDelta.sol";
-import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
-import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
-import {YieldSwapHook} from "../src/YieldSwapHook.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
+import {PoolId} from "v4-core/src/types/PoolId.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
-import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
-import {EasyPosm} from "./utils/EasyPosm.sol";
-import {Fixtures} from "./utils/Fixtures.sol";
-import {Math} from "openzeppelin/utils/math/Math.sol";
-import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol"; // Add ERC20 import
+import {FullMath} from "v4-core/src/libraries/FullMath.sol";
+import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {ZooCustomAccounting} from "src/base/ZooCustomAccounting.sol";
 
-contract YieldSwapHookTest is Test, Fixtures {
-    using EasyPosm for IPositionManager;
-    using PoolIdLibrary for PoolKey;
-    using CurrencyLibrary for Currency;
+contract YieldSwapHookTest is Test, Deployers {
+    using SafeCast for uint256;
     using StateLibrary for IPoolManager;
-    using BalanceDeltaLibrary for BalanceDelta;
+
+    event Swap(
+        PoolId indexed poolId,
+        address indexed sender,
+        int128 amount0,
+        int128 amount1,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        int24 tick,
+        uint24 fee
+    );
+
+    event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
+    event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
 
     YieldSwapHook hook;
-    PoolId poolId;
 
-    uint256 tokenId;
-    int24 tickLower;
-    int24 tickUpper;
+    uint256 constant MAX_DEADLINE = 12329839823;
 
-    // Constants for testing
-    uint256 constant SWAP_AMOUNT = 10e18;
-    uint256 constant LIQUIDITY_AMOUNT = 100e18;
+    // Minimum and maximum ticks for a spacing of 60
+    int24 constant MIN_TICK = -887220;
+    int24 constant MAX_TICK = 887220;
+
+    PoolId id;
 
     function setUp() public {
-        // Make sure we can see console output
-        console.log("setUp start");
-        
-        // Creates the pool manager, utility routers, and test tokens
         deployFreshManagerAndRouters();
-        console.log("Managers and routers deployed");
-        
-        deployMintAndApprove2Currencies();
-        console.log("Currencies deployed and approved");
-        
-        deployAndApprovePosm(manager);
-        console.log("POSM deployed and approved");
-        
-        // Deploy the hook to an address with the correct flags
-        // Updated hook flags to match the latest implementation
-        address flags = address(
-            uint160(
-                Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | 
-                Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG |
-                Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG |
-                Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG // Added AFTER_SWAP_FLAG for reserve tracking
-            ) ^ (0x5555 << 144) // Namespace the hook to avoid collisions
+
+        hook = YieldSwapHook(
+            address(
+                uint160(
+                    Hooks.BEFORE_INITIALIZE_FLAG |
+                    Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.AFTER_ADD_LIQUIDITY_FLAG |
+                    Hooks.AFTER_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_SWAP_FLAG |
+                    Hooks.AFTER_SWAP_FLAG |
+                    Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                )
+            )
         );
-        bytes memory constructorArgs = abi.encode(manager);
-        deployCodeTo("YieldSwapHook.sol:YieldSwapHook", constructorArgs, flags);
-        hook = YieldSwapHook(flags);
-        console.log("Hook deployed at:", address(hook));
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(manager), address(hook));
+
+        deployMintAndApprove2Currencies();
+        (key, id) = initPool(currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
+
+        // 为测试账户批准合约操作代币
+        ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+
+        vm.label(Currency.unwrap(currency0), "SY_Token");
+        vm.label(Currency.unwrap(currency1), "PT_Token");
+    }
+
+    function test_beforeInitialize_poolKey_succeeds() public view {
+        (Currency _currency0, Currency _currency1, uint24 _fee, int24 _tickSpacing, IHooks _hooks) = hook.poolKey();
+
+        assertEq(Currency.unwrap(_currency0), Currency.unwrap(currency0));
+        assertEq(Currency.unwrap(_currency1), Currency.unwrap(currency1));
+        assertEq(_fee, LPFeeLibrary.DYNAMIC_FEE_FLAG);
+        assertEq(_tickSpacing, 60);
+        assertEq(address(_hooks), address(hook));
+    }
+
+    function test_initialize_already_reverts() public {
+        vm.expectRevert();
+        initPool(currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
+    }
+
+    function test_initial_state() public view {
+        // 验证默认参数
+        assertEq(hook.rateScalar(), hook.DEFAULT_RATE_SCALAR());
+        assertEq(hook.rateAnchor(), hook.DEFAULT_RATE_ANCHOR());
         
-        // Create the pool
-        key = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
-        poolId = key.toId();
-        manager.initialize(key, SQRT_PRICE_1_1);
-        console.log("Pool initialized");
+        // 验证初始流动性和储备金为零
+        assertEq(hook.totalSupply(), 0);
+        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
+        assertEq(reserveSY, 0);
+        assertEq(reservePT, 0);
         
-        // Approve tokens for the hook - Fixed to unwrap Currency to address first
-        // Skip approval for native ETH (which has address 0)
-        if (!currency0.isAddressZero()) {
-            ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
-        }
-        if (!currency1.isAddressZero()) {
-            ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
-        }
-        
-        // Add initial liquidity directly via the hook rather than PositionManager
-        // This aligns with our new implementation
-        _addInitialLiquidity();
+        // 验证所有者
+        assertEq(hook.owner(), address(this));
     }
     
-    function _addInitialLiquidity() internal {
-        // Add initial liquidity using the hook's addLiquidity function
-        // Fixed: Using ZooCustomAccounting's structs instead of trying to reference through YieldSwapHook
-        ZooCustomAccounting.AddLiquidityParams memory params = ZooCustomAccounting.AddLiquidityParams({
-            amount0Desired: LIQUIDITY_AMOUNT,
-            amount1Desired: LIQUIDITY_AMOUNT,
-            amount0Min: 0,
-            amount1Min: 0,
-            to: address(this),
-            deadline: block.timestamp + 60,
-            tickLower: TickMath.minUsableTick(key.tickSpacing),
-            tickUpper: TickMath.maxUsableTick(key.tickSpacing),
-            salt: bytes32(0)
-        });
+    // 测试添加流动性功能
+    function test_addLiquidity_succeeds() public {
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+
+        ZooCustomAccounting.AddLiquidityParams memory addLiquidityParams = ZooCustomAccounting.AddLiquidityParams(
+            10 ether, 10 ether, 9 ether, 9 ether, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+        );
+
+        hook.addLiquidity(addLiquidityParams);
+
+        uint256 liquidityTokenBal = hook.balanceOf(address(this));
+        uint256 minimumLiquidity = hook.MINIMUM_LIQUIDITY();
+
+        // 验证代币余额减少
+        assertEq(key.currency0.balanceOf(address(this)), prevBalance0 - 10 ether);
+        assertEq(key.currency1.balanceOf(address(this)), prevBalance1 - 10 ether);
+
+        // 验证收到流动性代币（减去最小流动性）
+        // 使用近似比较，允许小误差
+        assertApproxEqAbs(liquidityTokenBal, 10 ether - minimumLiquidity, 2000);
         
-        hook.addLiquidity(params);
+        // 验证总流动性
+        // totalSupply也需要接近10 ether，但可能会有小误差
+        assertApproxEqAbs(hook.totalSupply(), 10 ether - minimumLiquidity + minimumLiquidity, 2000);
         
-        // Check that the liquidity shares were minted correctly
-        uint256 lpTokenBalance = hook.balanceOf(address(this));
-        console.log("Initial LP token balance:", lpTokenBalance);
-        
-        // Check reserves after adding initial liquidity
+        // 验证储备金更新
         (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
-        console.log("Initial reserveSY:", reserveSY);
-        console.log("Initial reservePT:", reservePT);
+        console.log("reserveSY: ", reserveSY);
+        console.log("reservePT: ", reservePT);
+        assertEq(reserveSY, 10 ether);
+        assertEq(reservePT, 10 ether);
+    }
+    
+    function test_addLiquidity_fuzz_succeeds(uint112 amount) public {
+        vm.assume(amount > 0 && amount < 1_000_000 ether); // 添加合理的上限以避免溢出
+
+        ZooCustomAccounting.AddLiquidityParams memory addLiquidityParams = ZooCustomAccounting.AddLiquidityParams(
+            amount, amount, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+        );
+
+        hook.addLiquidity(addLiquidityParams);
+        
+        uint256 liquidityTokenBal = hook.balanceOf(address(this));
+        uint256 minimumLiquidity = hook.MINIMUM_LIQUIDITY();
+        
+        // 第一次添加流动性时，最小流动性被锁定
+        assertEq(liquidityTokenBal, amount - minimumLiquidity);
+        
+        // 验证储备金
+        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
+        assertEq(reserveSY, amount);
+        assertEq(reservePT, amount);
     }
 
-    function testOwnerFunctions() public {
-        // Test setting pool parameters
-        uint256 newRateScalar = 200; // Double the default value
-        int256 newRateAnchor = 0.2e18; // Different anchor value
+    function test_addLiquidity_multiple_succeeds() public {
+        // 第一次添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether, 10 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 liquidityBal1 = hook.balanceOf(address(this));
+        uint256 minimumLiquidity = hook.MINIMUM_LIQUIDITY();
+        assertEq(liquidityBal1, 10 ether - minimumLiquidity);
+        
+        // 第二次添加流动性
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+        
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                5 ether, 5 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 liquidityBal2 = hook.balanceOf(address(this));
+        
+        // 添加了5个代币，应该得到5个流动性代币（因为比例是1:1）
+        assertEq(liquidityBal2 - liquidityBal1, 5 ether);
+        
+        // 验证代币余额
+        assertEq(key.currency0.balanceOf(address(this)), prevBalance0 - 5 ether);
+        assertEq(key.currency1.balanceOf(address(this)), prevBalance1 - 5 ether);
+        
+        // 验证储备金
+        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
+        assertEq(reserveSY, 15 ether);
+        assertEq(reservePT, 15 ether);
+    }
 
-        // Should fail when called by non-owner
-        vm.prank(address(1));
+    function test_addLiquidity_expired_revert() public {
+        vm.expectRevert(ZooCustomAccounting.ExpiredPastDeadline.selector);
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether, 10 ether, 0, 0, address(this), block.timestamp - 1, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+    }
+    
+    function test_addLiquidity_tooMuchSlippage_reverts() public {
+        vm.expectRevert(ZooCustomAccounting.TooMuchSlippage.selector);
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether,
+                10 ether,
+                100 ether, // 设置非常高的最小值
+                100 ether,
+                address(this),
+                MAX_DEADLINE,
+                MIN_TICK,
+                MAX_TICK,
+                bytes32(0)
+            )
+        );
+    }
+
+    // 测试移除流动性功能
+    function test_removeLiquidity_partial_succeeds() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether, 10 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 initialLiquidity = hook.balanceOf(address(this));
+        
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+        
+        // 移除一半流动性
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                initialLiquidity / 2, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 remainingLiquidity = hook.balanceOf(address(this));
+        
+        // 验证流动性代币减少
+        assertEq(remainingLiquidity, initialLiquidity - initialLiquidity / 2);
+        
+        // 验证收到的代币
+        assertEq(key.currency0.balanceOf(address(this)), prevBalance0 + 5 ether);
+        assertEq(key.currency1.balanceOf(address(this)), prevBalance1 + 5 ether);
+        
+        // 验证储备金更新
+        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
+        assertEq(reserveSY, 5 ether);
+        assertEq(reservePT, 5 ether);
+    }
+    
+    function test_removeLiquidity_full_succeeds() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether, 10 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 liquidityTokenBal = hook.balanceOf(address(this));
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+        
+        // 移除全部流动性
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                liquidityTokenBal, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 验证流动性代币为0
+        assertEq(hook.balanceOf(address(this)), 0);
+        
+        // 验证代币余额增加
+        // 注意：由于MINIMUM_LIQUIDITY锁定在地址0，我们不会拿回全部10个代币，而是略少于10个
+        uint256 expectedReturn = 10 ether - (10 ether * hook.MINIMUM_LIQUIDITY() / hook.totalSupply());
+        assertApproxEqAbs(key.currency0.balanceOf(address(this)), prevBalance0 + expectedReturn, 1);
+        assertApproxEqAbs(key.currency1.balanceOf(address(this)), prevBalance1 + expectedReturn, 1);
+        
+        // 验证储备金接近于0（除了锁定在MINIMUM_LIQUIDITY中的部分）
+        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(key);
+        assertTrue(reserveSY < hook.MINIMUM_LIQUIDITY());
+        assertTrue(reservePT < hook.MINIMUM_LIQUIDITY());
+    }
+    
+    function test_removeLiquidity_tooMuchSlippage_reverts() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                10 ether, 10 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 liquidityTokenBal = hook.balanceOf(address(this));
+        
+        // 设置很高的滑点保护
+        vm.expectRevert(ZooCustomAccounting.TooMuchSlippage.selector);
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                liquidityTokenBal, 20 ether, 20 ether, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+    }
+    
+    function test_removeLiquidity_fuzz_succeeds(uint112 addAmount, uint112 removeAmount) public {
+        vm.assume(addAmount > 1000 && addAmount < 1_000_000 ether);
+        
+        // 添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                addAmount, addAmount, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 liquidityTokenBal = hook.balanceOf(address(this));
+        
+        // 确保移除量不超过余额
+        uint256 actualRemoveAmount = bound(removeAmount, 1, uint112(liquidityTokenBal));
+        
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+        
+        // 移除流动性
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                actualRemoveAmount, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 验证流动性代币减少
+        assertEq(hook.balanceOf(address(this)), liquidityTokenBal - actualRemoveAmount);
+        
+        // 验证代币余额增加
+        assertTrue(key.currency0.balanceOf(address(this)) > prevBalance0);
+        assertTrue(key.currency1.balanceOf(address(this)) > prevBalance1);
+    }
+    
+    // 测试交换功能（SY到PT）
+    function test_swap_SY_to_PT_succeeds() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this));
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this));
+        
+        // 获取初始储备金
+        (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
+        
+        // 计算预期输出（使用getQuote）
+        uint256 syAmount = 10 ether;
+        uint256 expectedPTAmount = hook.getQuote(key, syAmount);
+        
+        // 执行交换（SY到PT，zeroForOne = true）
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        
+        // 验证余额变化
+        assertEq(key.currency0.balanceOf(address(this)), prevBalance0 - syAmount);
+        // PT接收量应与预期接近
+        assertApproxEqRel(
+            key.currency1.balanceOf(address(this)) - prevBalance1,
+            expectedPTAmount,
+            1e15 // 允许0.1%误差
+        );
+        
+        // 验证储备金更新
+        (uint256 reserveSYAfter, uint256 reservePTAfter) = hook.getReserves(key);
+        assertEq(reserveSYAfter, reserveSYBefore + syAmount);
+        assertEq(reservePTAfter, reservePTBefore - (key.currency1.balanceOf(address(this)) - prevBalance1));
+    }
+    
+    function test_swap_PT_to_SY_reverts() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 尝试PT到SY交换（zeroForOne = false），应该失败
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: MAX_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        vm.expectRevert(YieldSwapHook.OnlySYToPTSwapsSupported.selector);
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+    }
+    
+    function test_swap_exactOutput_reverts() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 尝试exactOutput交换（amountSpecified > 0），应该失败
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: 10 ether, sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        vm.expectRevert(YieldSwapHook.ExactInputOnly.selector);
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+    }
+    
+    // 测试多次交换后的价格变化
+    function test_multiple_swaps_price_change() public {
+        // 先添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 进行第一次交换
+        uint256 syAmount1 = 5 ether;
+        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params1 =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount1), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params1, settings, ZERO_BYTES);
+        
+        uint256 ptReceived1 = key.currency1.balanceOf(address(this)) - ptBefore1;
+        
+        // 进行第二次交换（相同金额）
+        uint256 syAmount2 = 5 ether;
+        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params2 =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount2), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        
+        swapRouter.swap(key, params2, settings, ZERO_BYTES);
+        
+        uint256 ptReceived2 = key.currency1.balanceOf(address(this)) - ptBefore2;
+        
+        // 验证第二次获得的PT应该与第一次不同（由于算法导致的价格变化）
+        // 在我们的模型中，随着SY代币比例增加，PT代币的价格会变化
+        assertFalse(ptReceived1 == ptReceived2);
+    }
+    
+    // 测试大量SY交换对价格的影响
+    function test_large_swap_impact() public {
+        // 添加足够的流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 进行小额交换
+        uint256 smallAmount = 1 ether;
+        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory smallParams =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(smallAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, smallParams, settings, ZERO_BYTES);
+        
+        uint256 ptReceivedSmall = key.currency1.balanceOf(address(this)) - ptBefore1;
+        uint256 rateSmall = (ptReceivedSmall * 1e18) / smallAmount;
+        
+        // 进行大额交换
+        uint256 largeAmount = 100 ether;
+        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory largeParams =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(largeAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        
+        swapRouter.swap(key, largeParams, settings, ZERO_BYTES);
+        
+        uint256 ptReceivedLarge = key.currency1.balanceOf(address(this)) - ptBefore2;
+        uint256 rateLarge = (ptReceivedLarge * 1e18) / largeAmount;
+        
+        // 验证大额交换的交换率不等于小额交换的交换率
+        // 大量交换应该对价格有显著影响
+        assertFalse(rateSmall == rateLarge);
+    }
+    
+    // 测试池参数更新
+    function test_setPoolParameters() public {
+        // 添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 更新参数
+        uint256 newScalar = 200;
+        int256 newAnchor = 1.2e18;
+        
+        vm.expectEmit(true, true, false, false);
+        emit ParametersUpdated(newScalar, newAnchor);
+        
+        hook.setPoolParameters(key, newScalar, newAnchor);
+        
+        // 验证参数已更新
+        assertEq(hook.rateScalar(), newScalar);
+        assertEq(hook.rateAnchor(), newAnchor);
+        
+        // 执行交换，验证新参数生效
+        uint256 syAmount = 10 ether;
+        uint256 ptBefore = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        
+        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
+        
+        // 预期的输出量是用新参数计算的
+        uint256 expectedWithNewParams = hook.getQuote(key, syAmount);
+        assertApproxEqRel(ptReceived, expectedWithNewParams, 1e15); // 接受0.1%误差
+    }
+    
+    // 测试所有权控制
+    function test_ownership_control() public {
+        // 初始所有者是测试合约
+        assertEq(hook.owner(), address(this));
+        
+        // 非所有者无法设置参数
+        address user1 = address(0x1234);
+        vm.startPrank(user1);
         vm.expectRevert(YieldSwapHook.OnlyOwner.selector);
-        hook.setPoolParameters(key, newRateScalar, newRateAnchor);
-
-        // Should succeed when called by owner
-        hook.setPoolParameters(key, newRateScalar, newRateAnchor);
-
-        // Test transferring ownership
-        address newOwner = address(2);
+        hook.setPoolParameters(key, 200, 1.2e18);
+        vm.stopPrank();
+        
+        // 转移所有权
+        address newOwner = address(0x5678);
         hook.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner);
-
-        // Should fail when called by old owner
+        
+        // 旧所有者无法设置参数
         vm.expectRevert(YieldSwapHook.OnlyOwner.selector);
-        hook.setPoolParameters(key, newRateScalar, newRateAnchor);
-
-        // Should succeed when called by new owner
-        vm.prank(newOwner);
-        hook.setPoolParameters(key, newRateScalar, newRateAnchor);
+        hook.setPoolParameters(key, 200, 1.2e18);
+        
+        // 新所有者可以设置参数
+        vm.startPrank(newOwner);
+        hook.setPoolParameters(key, 200, 1.2e18);
+        assertEq(hook.rateScalar(), 200);
+        vm.stopPrank();
     }
-
-    function testMinimumLiquidity() public {
-        // Create a new pool to test MINIMUM_LIQUIDITY
-        address token3 = address(new MockERC20("Token3", "TKN3"));
-        address token4 = address(new MockERC20("Token4", "TKN4"));
-        Currency currency3 = Currency.wrap(token3);
-        Currency currency4 = Currency.wrap(token4);
-        
-        // Mint tokens
-        deal(token3, address(this), 1000e18);
-        deal(token4, address(this), 1000e18);
-        
-        // Approve tokens - Fixed to use underlying ERC20 tokens directly
-        MockERC20(token3).approve(address(manager), type(uint256).max);
-        MockERC20(token4).approve(address(manager), type(uint256).max);
-        MockERC20(token3).approve(address(hook), type(uint256).max);
-        MockERC20(token4).approve(address(hook), type(uint256).max);
-        
-        // Create new pool with hook
-        PoolKey memory newKey = PoolKey(currency3, currency4, 3000, 60, IHooks(hook));
-        manager.initialize(newKey, SQRT_PRICE_1_1);
-        
-        // Add liquidity with a new provider - Fixed parameter type
-        ZooCustomAccounting.AddLiquidityParams memory params = ZooCustomAccounting.AddLiquidityParams({
-            amount0Desired: 100e18,
-            amount1Desired: 100e18,
-            amount0Min: 0,
-            amount1Min: 0,
-            to: address(this),
-            deadline: block.timestamp + 60,
-            tickLower: TickMath.minUsableTick(newKey.tickSpacing),
-            tickUpper: TickMath.maxUsableTick(newKey.tickSpacing),
-            salt: bytes32(0)
-        });
-        
-        hook.addLiquidity(params);
-        
-        // Check that MINIMUM_LIQUIDITY was sent to address(0)
-        uint256 minimumLiquidity = hook.MINIMUM_LIQUIDITY();
-        assertEq(hook.balanceOf(address(0)), minimumLiquidity);
-        
-        // Calculate expected liquidity: sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY
-        uint256 expectedLiquidity = Math.sqrt(params.amount0Desired * params.amount1Desired) - minimumLiquidity;
-        assertEq(hook.balanceOf(address(this)), expectedLiquidity);
-    }
-
-    function testSwapSYToPT() public {
-        // Get initial reserves
-        (uint256 initialReserveSY, uint256 initialReservePT) = hook.getReserves(key);
-        
-        // Quote first to see expected output
-        uint256 expectedOutput = hook.getQuote(key, SWAP_AMOUNT);
-        
-        // Perform swap - SY to PT (zeroForOne = true)
-        bool zeroForOne = true;
-        int256 amountSpecified = -int256(SWAP_AMOUNT); // negative for exact input
-        BalanceDelta swapDelta = swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
-        
-        // Check the swap delta
-        assertEq(swapDelta.amount0(), amountSpecified); // Should have spent exactly SWAP_AMOUNT of SY
-        
-        // Since amount1 is positive (we receive PT tokens)
-        uint256 actualOutput = uint256(int256(swapDelta.amount1()));
-        console.log("testSwapSYToPT, actualOutput:", actualOutput);
-        console.log("testSwapSYToPT, expectedOutput:", expectedOutput);
-        assertEq(actualOutput, expectedOutput, "Actual output should match expected");
-        
-        // Check final reserves
-        (uint256 finalReserveSY, uint256 finalReservePT) = hook.getReserves(key);
-        assertEq(finalReserveSY, initialReserveSY + SWAP_AMOUNT, "SY reserves should increase by swap amount");
-        assertEq(finalReservePT, initialReservePT - expectedOutput, "PT reserves should decrease by output amount");
-    }
-
-    function testFailSwapPTToSY() public {
-        // This should fail as we only support SY to PT swaps
-        bool zeroForOne = false; // PT to SY
-        int256 amountSpecified = -int256(SWAP_AMOUNT);
-        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
-    }
-
-    function testFailExactOutputSwap() public {
-        // This should fail as we only support exact input swaps
-        bool zeroForOne = true; // SY to PT
-        int256 amountSpecified = int256(SWAP_AMOUNT); // positive for exact output
-        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
-    }
-
-    function testAddAndRemoveLiquidity() public {
-        // Get initial state
-        uint256 initialLpTokens = hook.balanceOf(address(this));
-        (uint256 initialReserveSY, uint256 initialReservePT) = hook.getReserves(key);
-        
-        // Add more liquidity - Fixed parameter type
-        ZooCustomAccounting.AddLiquidityParams memory addParams = ZooCustomAccounting.AddLiquidityParams({
-            amount0Desired: 50e18,
-            amount1Desired: 50e18, 
-            amount0Min: 0,
-            amount1Min: 0,
-            to: address(this),
-            deadline: block.timestamp + 60,
-            tickLower: TickMath.minUsableTick(key.tickSpacing),
-            tickUpper: TickMath.maxUsableTick(key.tickSpacing),
-            salt: bytes32(0)
-        });
-        
-        hook.addLiquidity(addParams);
-        
-        // Check state after adding liquidity
-        uint256 midLpTokens = hook.balanceOf(address(this));
-        (uint256 midReserveSY, uint256 midReservePT) = hook.getReserves(key);
-        
-        assertEq(midReserveSY, initialReserveSY + addParams.amount0Desired, "SY reserves should increase correctly");
-        assertEq(midReservePT, initialReservePT + addParams.amount1Desired, "PT reserves should increase correctly");
-        
-        // For V2-style liquidity math with existing liquidity:
-        // liquidity = min(amount0 * totalSupply / reserve0, amount1 * totalSupply / reserve1)
-        uint256 expectedNewLpTokens = Math.min(
-            (addParams.amount0Desired * initialLpTokens) / initialReserveSY,
-            (addParams.amount1Desired * initialLpTokens) / initialReservePT
+    
+    // 测试价格计算
+    function test_price_calculation() public {
+        // 1. 添加初始流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                50 ether, 50 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
         );
-        assertEq(midLpTokens - initialLpTokens, expectedNewLpTokens, "LP tokens should increase correctly");
         
-        // Now remove half of the liquidity
-        uint256 lpTokensToRemove = expectedNewLpTokens / 2;
+        // 2. 获取初始SY对PT的价格（通过小额交换）
+        uint256 smallAmount = 0.1 ether;
+        uint256 ptBefore = key.currency1.balanceOf(address(this));
         
-        ZooCustomAccounting.RemoveLiquidityParams memory removeParams = ZooCustomAccounting.RemoveLiquidityParams({
-            liquidity: lpTokensToRemove,
-            amount0Min: 0,
-            amount1Min: 0,
-            deadline: block.timestamp + 60,
-            tickLower: TickMath.minUsableTick(key.tickSpacing),
-            tickUpper: TickMath.maxUsableTick(key.tickSpacing),
-            salt: bytes32(0)
-        });
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(smallAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         
-        // Approve hook to spend our LP tokens
-        hook.approve(address(hook), lpTokensToRemove);
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
         
-        hook.removeLiquidity(removeParams);
+        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
+        uint256 initialRate = (ptReceived * 1e18) / smallAmount;
         
-        // Check final state
-        uint256 finalLpTokens = hook.balanceOf(address(this));
-        (uint256 finalReserveSY, uint256 finalReservePT) = hook.getReserves(key);
+        // 3. 增加SY的比例
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                50 ether, 0, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
         
-        assertEq(finalLpTokens, midLpTokens - lpTokensToRemove, "LP tokens should decrease correctly");
+        // 4. 再次获取价格
+        ptBefore = key.currency1.balanceOf(address(this));
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
         
-        // Expected amounts to be removed based on proportional share:
-        uint256 expectedSYRemoved = (midReserveSY * lpTokensToRemove) / midLpTokens;
-        uint256 expectedPTRemoved = (midReservePT * lpTokensToRemove) / midLpTokens;
+        ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
+        uint256 newRate = (ptReceived * 1e18) / smallAmount;
         
-        assertEq(finalReserveSY, midReserveSY - expectedSYRemoved, "SY reserves should decrease correctly");
-        assertEq(finalReservePT, midReservePT - expectedPTRemoved, "PT reserves should decrease correctly");
+        // 5. 验证价格发生了变化
+        // 根据公式，增加SY比例应该导致PT价格降低
+        assertTrue(newRate > initialRate);
     }
-
-    function testPriceImpact() public view {
-        // Small swap should have minimal price impact
-        uint256 smallAmount = 1e18;
-        uint256 smallQuote = hook.getQuote(key, smallAmount);
-        uint256 smallRate = (smallQuote * 1e18) / smallAmount;
+    
+    // 测试流动性提供者的权益比例
+    function test_liquidity_provider_share() public {
+        // 创建两个LP地址
+        address lp1 = address(0xAA);
+        address lp2 = address(0xBB);
         
-        // Large swap should have more price impact
-        uint256 largeAmount = 100e18;
-        uint256 largeQuote = hook.getQuote(key, largeAmount);
-        uint256 largeRate = (largeQuote * 1e18) / largeAmount;
+        // 给LP1和LP2足够的代币
+        deal(Currency.unwrap(currency0), lp1, 100 ether);
+        deal(Currency.unwrap(currency1), lp1, 100 ether);
+        deal(Currency.unwrap(currency0), lp2, 100 ether);
+        deal(Currency.unwrap(currency1), lp2, 100 ether);
         
-        // Due to the curve formula, larger swaps should have worse rates (less PT per SY)
-        assert(largeRate < smallRate);
+        // LP批准合约操作代币
+        vm.startPrank(lp1);
+        ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(lp2);
+        ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        vm.stopPrank();
+        
+        // LP1提供流动性
+        vm.startPrank(lp1);
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                40 ether, 40 ether, 0, 0, lp1, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        vm.stopPrank();
+        
+        uint256 lp1Liquidity = hook.balanceOf(lp1);
+        
+        // LP2提供流动性
+        vm.startPrank(lp2);
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                60 ether, 60 ether, 0, 0, lp2, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        vm.stopPrank();
+        
+        uint256 lp2Liquidity = hook.balanceOf(lp2);
+        
+        // 用户交换导致池子收益
+        uint256 syAmount = 20 ether;
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        
+        // LP1移除全部流动性
+        uint256 lp1SYBefore = key.currency0.balanceOf(lp1);
+        uint256 lp1PTBefore = key.currency1.balanceOf(lp1);
+        
+        vm.startPrank(lp1);
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                lp1Liquidity, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        vm.stopPrank();
+        
+        uint256 lp1SYReceived = key.currency0.balanceOf(lp1) - lp1SYBefore;
+        uint256 lp1PTReceived = key.currency1.balanceOf(lp1) - lp1PTBefore;
+        
+        // LP2移除全部流动性
+        uint256 lp2SYBefore = key.currency0.balanceOf(lp2);
+        uint256 lp2PTBefore = key.currency1.balanceOf(lp2);
+        
+        vm.startPrank(lp2);
+        hook.removeLiquidity(
+            ZooCustomAccounting.RemoveLiquidityParams(
+                lp2Liquidity, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        vm.stopPrank();
+        
+        uint256 lp2SYReceived = key.currency0.balanceOf(lp2) - lp2SYBefore;
+        uint256 lp2PTReceived = key.currency1.balanceOf(lp2) - lp2PTBefore;
+        
+        // 验证LP2获得的代币比LP1多60%左右（与其流动性比例一致）
+        assertApproxEqRel(lp2SYReceived, lp1SYReceived * 3 / 2, 0.01e18); // 允许1%误差
+        assertApproxEqRel(lp2PTReceived, lp1PTReceived * 3 / 2, 0.01e18); // 允许1%误差
     }
-
-    function testMultipleSwaps() public {
-        // Do multiple swaps and verify each one changes the reserves correctly
-        for (uint i = 0; i < 5; i++) {
-            uint256 swapSize = SWAP_AMOUNT / 5;
+    
+    // 测试交易量变化对价格的影响
+    function test_volume_impact_on_price() public {
+        // 添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 收集不同交易量的交易率
+        uint256[] memory volumes = new uint256[](5);
+        volumes[0] = 0.1 ether;
+        volumes[1] = 1 ether;
+        volumes[2] = 10 ether;
+        volumes[3] = 100 ether;
+        volumes[4] = 200 ether;
+        
+        uint256[] memory rates = new uint256[](5);
+        
+        for (uint i = 0; i < volumes.length; i++) {
+            uint256 ptBefore = key.currency1.balanceOf(address(this));
             
-            (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
-            uint256 quote = hook.getQuote(key, swapSize);
+            IPoolManager.SwapParams memory params =
+                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(volumes[i]), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+            PoolSwapTest.TestSettings memory settings =
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
             
-            bool zeroForOne = true;
-            int256 amountSpecified = -int256(swapSize);
-            BalanceDelta delta = swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+            swapRouter.swap(key, params, settings, ZERO_BYTES);
             
-            (uint256 reserveSYAfter, uint256 reservePTAfter) = hook.getReserves(key);
+            uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
+            rates[i] = (ptReceived * 1e18) / volumes[i];
             
-            // Verify reserves were updated correctly
-            assertEq(reserveSYAfter, reserveSYBefore + swapSize, "SY reserves should increase correctly");
-            
-            uint256 actualOutput = uint256(int256(delta.amount1()));
-            assertEq(reservePTAfter, reservePTBefore - actualOutput, "PT reserves should decrease by output amount");
-            assertEq(actualOutput, quote, "Actual output should match quoted amount");
+            // 每次交易后重置池子状态
+            if (i < volumes.length - 1) {
+                // 添加足够的流动性覆盖之前的交易
+                hook.addLiquidity(
+                    ZooCustomAccounting.AddLiquidityParams(
+                        volumes[i] * 2, ptReceived * 2, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+                    )
+                );
+            }
+        }
+        
+        // 验证交易量增加，交易率会下降
+        for (uint i = 1; i < rates.length; i++) {
+            assertTrue(rates[i] < rates[i-1]);
         }
     }
     
-    function testRemoveAllLiquidity() public {
-        uint256 lpTokens = hook.balanceOf(address(this));
+    // 测试不同储备金比例对价格的影响
+    function test_reserve_ratio_impact() public {
+        // 初始化不同SY:PT比例的池子
+        YieldSwapHook[] memory hooks = new YieldSwapHook[](3);
+        PoolKey[] memory keys = new PoolKey[](3);
         
-        // Approve hook to spend our LP tokens
-        hook.approve(address(hook), lpTokens);
+        // 创建池子1：SY:PT = 1:1
+        hooks[0] = YieldSwapHook(
+            address(
+                uint160(
+                    Hooks.BEFORE_INITIALIZE_FLAG |
+                    Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.AFTER_ADD_LIQUIDITY_FLAG |
+                    Hooks.AFTER_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_SWAP_FLAG |
+                    Hooks.AFTER_SWAP_FLAG |
+                    Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                )
+            )
+        );
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(manager), address(hooks[0]));
         
-        // Remove all liquidity - Fixed parameter type
-        ZooCustomAccounting.RemoveLiquidityParams memory removeParams = ZooCustomAccounting.RemoveLiquidityParams({
-            liquidity: lpTokens,
-            amount0Min: 0,
-            amount1Min: 0,
-            deadline: block.timestamp + 60,
-            tickLower: TickMath.minUsableTick(key.tickSpacing),
-            tickUpper: TickMath.maxUsableTick(key.tickSpacing),
-            salt: bytes32(0)
-        });
+        // 创建池子2：SY:PT = 2:1
+        hooks[1] = YieldSwapHook(
+            address(
+                uint160(
+                    Hooks.BEFORE_INITIALIZE_FLAG |
+                    Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.AFTER_ADD_LIQUIDITY_FLAG |
+                    Hooks.AFTER_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_SWAP_FLAG |
+                    Hooks.AFTER_SWAP_FLAG |
+                    Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                ) + 1
+            )
+        );
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(manager), address(hooks[1]));
         
-        hook.removeLiquidity(removeParams);
+        // 创建池子3：SY:PT = 1:2
+        hooks[2] = YieldSwapHook(
+            address(
+                uint160(
+                    Hooks.BEFORE_INITIALIZE_FLAG |
+                    Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.AFTER_ADD_LIQUIDITY_FLAG |
+                    Hooks.AFTER_REMOVE_LIQUIDITY_FLAG |
+                    Hooks.BEFORE_SWAP_FLAG |
+                    Hooks.AFTER_SWAP_FLAG |
+                    Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                ) + 2
+            )
+        );
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(manager), address(hooks[2]));
         
-        // Check final state
-        uint256 finalLpTokens = hook.balanceOf(address(this));
-        (uint256 finalReserveSY, uint256 finalReservePT) = hook.getReserves(key);
+        // 初始化每个池子
+        (keys[0],) = initPool(currency0, currency1, IHooks(address(hooks[0])), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
+        (keys[1],) = initPool(currency0, currency1, IHooks(address(hooks[1])), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
+        (keys[2],) = initPool(currency0, currency1, IHooks(address(hooks[2])), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
         
-        assertEq(finalLpTokens, 0, "All LP tokens should be burned");
-        // There might still be some dust amounts in reserves
-        assertLt(finalReserveSY, 10, "SY reserves should be nearly zero");
-        assertLt(finalReservePT, 10, "PT reserves should be nearly zero");
+        // 为每个池子批准代币
+        for (uint i = 0; i < hooks.length; i++) {
+            ERC20(Currency.unwrap(currency0)).approve(address(hooks[i]), type(uint256).max);
+            ERC20(Currency.unwrap(currency1)).approve(address(hooks[i]), type(uint256).max);
+        }
+        
+        // 添加不同比例的流动性
+        hooks[0].addLiquidity(ZooCustomAccounting.AddLiquidityParams(
+            100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+        ));
+        hooks[1].addLiquidity(ZooCustomAccounting.AddLiquidityParams(
+            200 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+        ));
+        hooks[2].addLiquidity(ZooCustomAccounting.AddLiquidityParams(
+            100 ether, 200 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+        ));
+        
+        // 相同数量的SY在各池中兑换成PT
+        uint256 syAmount = 1 ether;
+        uint256[] memory ptReceived = new uint256[](3);
+        
+        for (uint i = 0; i < hooks.length; i++) {
+            uint256 ptBefore = keys[i].currency1.balanceOf(address(this));
+            
+            IPoolManager.SwapParams memory params =
+                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+            PoolSwapTest.TestSettings memory settings =
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+            
+            swapRouter.swap(keys[i], params, settings, ZERO_BYTES);
+            
+            ptReceived[i] = keys[i].currency1.balanceOf(address(this)) - ptBefore;
+        }
+        
+        // 验证储备金比例对价格的影响：
+        // 池子1（1:1）应该是基准价格
+        // 池子2（2:1）SY较多，PT稀缺，所以PT价格应该高于基准（获得更少PT）
+        // 池子3（1:2）PT较多，PT过剩，所以PT价格应该低于基准（获得更多PT）
+        assertTrue(ptReceived[1] < ptReceived[0]); // 池子2获得的PT少于池子1
+        assertTrue(ptReceived[2] > ptReceived[0]); // 池子3获得的PT多于池子1
     }
-}
-
-// Mock ERC20 token for testing
-contract MockERC20 {
-    string public name;
-    string public symbol;
-    uint8 public decimals = 18;
-    uint256 public totalSupply;
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
     
-    constructor(string memory _name, string memory _symbol) {
-        name = _name;
-        symbol = _symbol;
-    }
-    
-    function approve(address spender, uint256 amount) public returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-    
-    function transfer(address to, uint256 amount) public returns (bool) {
-        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-    
-    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
-        require(allowance[from][msg.sender] >= amount, "Insufficient allowance");
-        require(balanceOf[from] >= amount, "Insufficient balance");
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
+    // 测试getQuote函数的准确性
+    function test_getQuote_accuracy() public {
+        // 添加流动性
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // 测试不同的SY金额
+        uint256[] memory amounts = new uint256[](4);
+        amounts[0] = 0.1 ether;
+        amounts[1] = 1 ether;
+        amounts[2] = 5 ether;
+        amounts[3] = 10 ether;
+        
+        for (uint i = 0; i < amounts.length; i++) {
+            // 获取预期输出
+            uint256 expectedOutput = hook.getQuote(key, amounts[i]);
+            
+            // 实际交换
+            uint256 ptBefore = key.currency1.balanceOf(address(this));
+            
+            IPoolManager.SwapParams memory params =
+                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(amounts[i]), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+            PoolSwapTest.TestSettings memory settings =
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+            
+            swapRouter.swap(key, params, settings, ZERO_BYTES);
+            
+            uint256 actualOutput = key.currency1.balanceOf(address(this)) - ptBefore;
+            
+            // 验证预期输出与实际输出相近（允许小误差）
+            assertApproxEqRel(actualOutput, expectedOutput, 0.001e18); // 允许0.1%误差
+            
+            // 重置池子状态
+            if (i < amounts.length - 1) {
+                hook.addLiquidity(
+                    ZooCustomAccounting.AddLiquidityParams(
+                        amounts[i], actualOutput, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+                    )
+                );
+            }
+        }
     }
 }

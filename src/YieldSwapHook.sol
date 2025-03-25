@@ -315,9 +315,9 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
         
         emit ReservesUpdated(reserveSY, reservePT);
         
-        // First liquidity provision - mint MINIMUM_LIQUIDITY to address(0)
+        // First liquidity provision - mint MINIMUM_LIQUIDITY to the contract itself instead of address(0)
         if (totalSupply() == MINIMUM_LIQUIDITY) {
-            super._mint(address(0), MINIMUM_LIQUIDITY);
+            super._mint(address(this), MINIMUM_LIQUIDITY);
         }
         
         return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
@@ -397,11 +397,11 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
         virtual
         override
     {
-        // First liquidity provision requires minting MINIMUM_LIQUIDITY to address(0)
+        // First liquidity provision requires minting MINIMUM_LIQUIDITY to the contract itself
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
-            super._mint(address(0), MINIMUM_LIQUIDITY);
-            // Reduce shares by MINIMUM_LIQUIDITY that was sent to address(0)
+            super._mint(address(this), MINIMUM_LIQUIDITY);
+            // Reduce shares by MINIMUM_LIQUIDITY that was locked in the contract
             shares -= MINIMUM_LIQUIDITY;
         }
         
