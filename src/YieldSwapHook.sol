@@ -392,7 +392,7 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
     /**
      * @notice Mint liquidity shares using ERC20 functionality
      */
-    function _mint(AddLiquidityParams memory params, BalanceDelta /* delta */, uint256 shares) 
+    function _mint(AddLiquidityParams memory params, BalanceDelta delta, uint256 shares) 
         internal 
         virtual
         override
@@ -405,17 +405,45 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
             shares -= MINIMUM_LIQUIDITY;
         }
         
+        // Directly update reserves here since _afterAddLiquidity might not be called
+        // delta amounts are negative when tokens are added to the pool
+        if (delta.amount0() < 0) {
+            // Converting -delta.amount0() to positive uint256
+            reserveSY += uint256(int256(-delta.amount0()));
+        }
+        
+        if (delta.amount1() < 0) {
+            // Converting -delta.amount1() to positive uint256
+            reservePT += uint256(int256(-delta.amount1()));
+        }
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
         _mint(params.to, shares);
     }
     
     /**
      * @notice Burn liquidity shares using ERC20 functionality
      */
-    function _burn(RemoveLiquidityParams memory /* params */, BalanceDelta /* delta */, uint256 shares) 
+    function _burn(RemoveLiquidityParams memory /* params */, BalanceDelta delta, uint256 shares) 
         internal 
         virtual
         override
     {
+        // Directly update reserves here since _afterRemoveLiquidity might not be called
+        // delta amounts are positive when tokens are removed from the pool
+        if (delta.amount0() > 0) {
+            // delta.amount0() is already positive
+            reserveSY -= uint256(int256(delta.amount0()));
+        }
+        
+        if (delta.amount1() > 0) {
+            // delta.amount1() is already positive
+            reservePT -= uint256(int256(delta.amount1()));
+        }
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
         _burn(msg.sender, shares);
     }
     
