@@ -17,6 +17,7 @@ import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 import {ZooCustomCurve} from "src/base/ZooCustomCurve.sol";
+import {CurrencySettler} from "src/utils/CurrencySettler.sol";
 
 /**
  * @title YieldSwapHook
@@ -26,6 +27,7 @@ import {ZooCustomCurve} from "src/base/ZooCustomCurve.sol";
 contract YieldSwapHook is ZooCustomCurve, ERC20 {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
+    using CurrencySettler for Currency; // Add this line to enable take() and settle() methods
     using SafeCast for uint256;
     using SafeCast for int256;
     using StateLibrary for IPoolManager;
@@ -144,20 +146,20 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
         override
         returns (uint256 unspecifiedAmount)
     {
-        // CHANGE: Only support exactInput swaps
+        // Check for exact input vs exact output first
         if (params.amountSpecified >= 0) {
             revert ExactInputOnly();
         }
         
-        // For SY to PT swaps (zeroForOne = true)
+        // Then check swap direction
         if (params.zeroForOne) {
             // Get absolute value of input amount
             uint256 amountIn = uint256(-params.amountSpecified);
             return _getAmountOutFromExactInput(amountIn, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+        } else {
+            // For PT to SY swaps (zeroForOne = false) - not supported in our model
+            revert OnlySYToPTSwapsSupported();
         }
-        
-        // For PT to SY swaps (zeroForOne = false) - not supported in our model
-        revert OnlySYToPTSwapsSupported();
     }
     
     /**
@@ -285,6 +287,49 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
     }
     
     /**
+     * @notice Override the _beforeSwap hook to handle swap calculations and update reserves
+     */
+    function _beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        bytes calldata hookData
+    ) internal virtual override returns (bytes4, BeforeSwapDelta, uint24) {
+        // Only handle SY to PT swaps (zeroForOne = true)
+        if (!params.zeroForOne) {
+            revert OnlySYToPTSwapsSupported();
+        }
+        
+        // Only support exactInput swaps - check this before calculating anything
+        // Skip super._beforeSwap entirely for exactOutput swaps
+        if (params.amountSpecified >= 0) {
+            revert ExactInputOnly();
+        }
+        
+        // Get absolute value of input amount (SY)
+        uint256 specifiedAmount = uint256(-params.amountSpecified);
+        
+        // Calculate output amount (PT) before calling super._beforeSwap
+        uint256 unspecifiedAmount = _getAmountOutFromExactInput(
+            specifiedAmount,
+            poolKey.currency0,
+            poolKey.currency1,
+            params.zeroForOne
+        );
+        
+        // Call parent implementation to handle token settlement
+        (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+        
+        // Update our reserves after parent implementation
+        reserveSY += specifiedAmount;
+        reservePT -= unspecifiedAmount;
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
+        return (selector, delta, fee);
+    }
+    
+    /**
      * @notice Process after liquidity is added to update our tracked reserves
      */
     function _afterAddLiquidity(
@@ -359,33 +404,17 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
     
     /**
      * @notice Process after swap to update our tracked reserves
+     * @dev We're now updating reserves in _beforeSwap, so this just returns the proper selector
      */
     function _afterSwap(
-        address /* sender */,
-        PoolKey calldata /* key */,
-        IPoolManager.SwapParams calldata /* params */,
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
         BalanceDelta delta,
-        bytes calldata /* hookData */
+        bytes calldata hookData
     ) internal override returns (bytes4, int128) {
-        // Update reserves based on the swap delta
-        if (delta.amount0() > 0) {
-            // delta.amount0() is already positive
-            reserveSY -= uint256(int256(delta.amount0()));
-        } else {
-            // Converting -delta.amount0() to positive uint256
-            reserveSY += uint256(int256(-delta.amount0()));
-        }
-        
-        if (delta.amount1() > 0) {
-            // delta.amount1() is already positive
-            reservePT -= uint256(int256(delta.amount1()));
-        } else {
-            // Converting -delta.amount1() to positive uint256
-            reservePT += uint256(int256(-delta.amount1()));
-        }
-        
-        emit ReservesUpdated(reserveSY, reservePT);
-        
+        // Since we're already updating reserves in _beforeSwap
+        // We don't need to update them again here
         return (this.afterSwap.selector, 0);
     }
     
