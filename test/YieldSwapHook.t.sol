@@ -14,14 +14,13 @@ import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {YieldSwapHook} from "../src/YieldSwapHook.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {BaseCustomAccounting} from "../lib/uniswap-hooks/src/base/BaseCustomAccounting.sol";
-// import {BaseCustomAccounting} from "@openzeppelin/uniswap-hooks/src/base/BaseCustomAccounting.sol";
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {EasyPosm} from "./utils/EasyPosm.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 import {Math} from "openzeppelin/utils/math/Math.sol";
 import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol"; // Add ERC20 import
+import {ZooCustomAccounting} from "src/base/ZooCustomAccounting.sol";
 
 contract YieldSwapHookTest is Test, Fixtures {
     using EasyPosm for IPositionManager;
@@ -92,8 +91,8 @@ contract YieldSwapHookTest is Test, Fixtures {
     
     function _addInitialLiquidity() internal {
         // Add initial liquidity using the hook's addLiquidity function
-        // Fixed: Using BaseCustomAccounting's structs instead of trying to reference through YieldSwapHook
-        BaseCustomAccounting.AddLiquidityParams memory params = BaseCustomAccounting.AddLiquidityParams({
+        // Fixed: Using ZooCustomAccounting's structs instead of trying to reference through YieldSwapHook
+        ZooCustomAccounting.AddLiquidityParams memory params = ZooCustomAccounting.AddLiquidityParams({
             amount0Desired: LIQUIDITY_AMOUNT,
             amount1Desired: LIQUIDITY_AMOUNT,
             amount0Min: 0,
@@ -166,7 +165,7 @@ contract YieldSwapHookTest is Test, Fixtures {
         manager.initialize(newKey, SQRT_PRICE_1_1);
         
         // Add liquidity with a new provider - Fixed parameter type
-        BaseCustomAccounting.AddLiquidityParams memory params = BaseCustomAccounting.AddLiquidityParams({
+        ZooCustomAccounting.AddLiquidityParams memory params = ZooCustomAccounting.AddLiquidityParams({
             amount0Desired: 100e18,
             amount1Desired: 100e18,
             amount0Min: 0,
@@ -236,7 +235,7 @@ contract YieldSwapHookTest is Test, Fixtures {
         (uint256 initialReserveSY, uint256 initialReservePT) = hook.getReserves(key);
         
         // Add more liquidity - Fixed parameter type
-        BaseCustomAccounting.AddLiquidityParams memory addParams = BaseCustomAccounting.AddLiquidityParams({
+        ZooCustomAccounting.AddLiquidityParams memory addParams = ZooCustomAccounting.AddLiquidityParams({
             amount0Desired: 50e18,
             amount1Desired: 50e18, 
             amount0Min: 0,
@@ -268,7 +267,7 @@ contract YieldSwapHookTest is Test, Fixtures {
         // Now remove half of the liquidity
         uint256 lpTokensToRemove = expectedNewLpTokens / 2;
         
-        BaseCustomAccounting.RemoveLiquidityParams memory removeParams = BaseCustomAccounting.RemoveLiquidityParams({
+        ZooCustomAccounting.RemoveLiquidityParams memory removeParams = ZooCustomAccounting.RemoveLiquidityParams({
             liquidity: lpTokensToRemove,
             amount0Min: 0,
             amount1Min: 0,
@@ -342,7 +341,7 @@ contract YieldSwapHookTest is Test, Fixtures {
         hook.approve(address(hook), lpTokens);
         
         // Remove all liquidity - Fixed parameter type
-        BaseCustomAccounting.RemoveLiquidityParams memory removeParams = BaseCustomAccounting.RemoveLiquidityParams({
+        ZooCustomAccounting.RemoveLiquidityParams memory removeParams = ZooCustomAccounting.RemoveLiquidityParams({
             liquidity: lpTokens,
             amount0Min: 0,
             amount1Min: 0,

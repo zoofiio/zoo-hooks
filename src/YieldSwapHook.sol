@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {console} from "forge-std/console.sol";
-import {BaseCustomCurve} from "../lib/uniswap-hooks/src/base/BaseCustomCurve.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -17,13 +16,14 @@ import {Math} from "openzeppelin/utils/math/Math.sol";
 import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
+import {ZooCustomCurve} from "src/base/ZooCustomCurve.sol";
 
 /**
  * @title YieldSwapHook
  * @notice A custom AMM Hook for yield products based on Uniswap V4
  * @dev Provides custom pricing logic for SY and PT tokens
  */
-contract YieldSwapHook is BaseCustomCurve, ERC20 {
+contract YieldSwapHook is ZooCustomCurve, ERC20 {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using SafeCast for uint256;
@@ -63,7 +63,7 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
     event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
     
     constructor(IPoolManager _poolManager) 
-        BaseCustomCurve(_poolManager) 
+        ZooCustomCurve(_poolManager) 
         ERC20("YieldSwap Liquidity", "YSL") 
     {
         owner = msg.sender;
