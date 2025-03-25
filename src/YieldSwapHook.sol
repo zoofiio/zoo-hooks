@@ -16,7 +16,7 @@ import {MathLibrary} from "./libraries/MathLibrary.sol";
 import {Math} from "openzeppelin/utils/math/Math.sol";
 import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol"; // Add this import
+import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 
 /**
  * @title YieldSwapHook
@@ -29,7 +29,8 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
     using SafeCast for uint256;
     using SafeCast for int256;
     using StateLibrary for IPoolManager;
-    using TransientStateLibrary for IPoolManager; // Add this line
+    using TransientStateLibrary for IPoolManager;
+    using BalanceDeltaLibrary for BalanceDelta;
     
     // Parameters for the pricing formula (for single pool)
     uint256 public rateScalar;   // Denominator parameter in the pricing formula
@@ -42,14 +43,24 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
     // Owner address to control parameter settings
     address public owner;
     
+    // Track reserves manually
+    uint256 public reserveSY;    // Reserve of SY tokens (token0)
+    uint256 public reservePT;    // Reserve of PT tokens (token1)
+    
+    // Minimum liquidity constant (Uniswap V2 style)
+    uint256 public constant MINIMUM_LIQUIDITY = 1000;
+    
     // Error declarations
     error OnlySYToPTSwapsSupported();
     error InvalidPoolConfiguration();
     error MathError();
     error InsufficientPTReserves();
     error OnlyOwner();
+    error ExactInputOnly();      // New error for exact input only swaps
+    error InsufficientLiquidity();
     
     event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
+    event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
     
     constructor(IPoolManager _poolManager) 
         BaseCustomCurve(_poolManager) 
@@ -58,29 +69,19 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         owner = msg.sender;
         rateScalar = DEFAULT_RATE_SCALAR;
         rateAnchor = DEFAULT_RATE_ANCHOR;
+        // Reserves start at 0
+        reserveSY = 0;
+        reservePT = 0;
     }
     
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
         _;
     }
-    
-    // Helper function to get reserves from a pool
-    function getReservesForPool(PoolKey memory key) internal view returns (uint256 reserve0, uint256 reserve1) {
-        // StateLibrary's getLiquidity returns a single liquidity value, not a tuple with 4 components
-        uint128 liquidity = poolManager.getLiquidity(key.toId());
-        
-        // In a yield swap contract, we're dealing with SY (token0) and PT (token1)
-        // For simplicity, we'll split the liquidity equally, but in a real implementation
-        // you would need to calculate these based on your specific pricing model
-        reserve0 = liquidity / 2;
-        reserve1 = liquidity / 2;
-        return (reserve0, reserve1);
-    }
-    
-    // New externally visible helper function to get reserves for testing
-    function getReserves(PoolKey calldata key) external view returns (uint256 reserve0, uint256 reserve1) {
-        return getReservesForPool(key);
+
+    // Externally visible helper function to get reserves for testing
+    function getReserves(PoolKey calldata /* key */) external view returns (uint256 reserve0, uint256 reserve1) {
+        return (reserveSY, reservePT);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -135,6 +136,7 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
 
     /**
      * @notice Implementation of BaseCustomCurve's _getUnspecifiedAmount
+     * @dev Only supports exact input swaps (amountSpecified < 0)
      */
     function _getUnspecifiedAmount(IPoolManager.SwapParams calldata params)
         internal
@@ -142,19 +144,16 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         override
         returns (uint256 unspecifiedAmount)
     {
-        // Determine if the swap is exact input or exact output
-        bool exactInput = params.amountSpecified < 0;
+        // CHANGE: Only support exactInput swaps
+        if (params.amountSpecified >= 0) {
+            revert ExactInputOnly();
+        }
         
         // For SY to PT swaps (zeroForOne = true)
         if (params.zeroForOne) {
-            // If exact input, calculate how much PT user gets
-            if (exactInput) {
-                return _getAmountOutFromExactInput(uint256(-params.amountSpecified), poolKey.currency0, poolKey.currency1, params.zeroForOne);
-            } 
-            // If exact output, calculate how much SY user pays
-            else {
-                return _getAmountInForExactOutput(uint256(params.amountSpecified), poolKey.currency0, poolKey.currency1, params.zeroForOne);
-            }
+            // Get absolute value of input amount
+            uint256 amountIn = uint256(-params.amountSpecified);
+            return _getAmountOutFromExactInput(amountIn, poolKey.currency0, poolKey.currency1, params.zeroForOne);
         }
         
         // For PT to SY swaps (zeroForOne = false) - not supported in our model
@@ -176,8 +175,9 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         // Instead of checking initialized, check if poolKey is set
         if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
         
-        // Get reserves
-        (uint256 reserve0, uint256 reserve1) = getReservesForPool(poolKey);
+        // Use our tracked reserves
+        uint256 reserve0 = reserveSY;
+        uint256 reserve1 = reservePT;
         
         uint256 totalReserve = reserve0 + reserve1;
         if (totalReserve == 0) revert InvalidPoolConfiguration();
@@ -219,61 +219,21 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
     
     /**
      * @notice Calculate input amount (SY) needed for exact output amount (PT)
+     * @dev Not used due to exactInput only restriction
      */
     function _getAmountInForExactOutput(
-        uint256 amountOut,
+        uint256 /* amountOut */,
         Currency /* input */,
         Currency /* output */,
-        bool zeroForOne
-    ) internal view virtual returns (uint256 amountIn) {
-        // In our model, we only support SY to PT swaps (zeroForOne = true)
-        if (!zeroForOne) revert OnlySYToPTSwapsSupported();
-        
-        // Instead of checking initialized, check if poolKey is set
-        if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
-        
-        // Get reserves
-        (uint256 reserve0, uint256 reserve1) = getReservesForPool(poolKey);
-        
-        // Ensure there's enough PT in the pool
-        if (amountOut > reserve1) revert InsufficientPTReserves();
-        
-        uint256 totalReserve = reserve0 + reserve1;
-        if (totalReserve == 0) revert InvalidPoolConfiguration();
-        
-        // Calculate portion_PT before swap
-        uint256 portionPTBefore = (reserve1 * 1e18) / totalReserve;
-        
-        // Calculate Price_SY_Before
-        int256 priceSYBefore = calculatePrice(portionPTBefore, rateScalar, rateAnchor);
-        
-        // Calculate reserves after swap
-        uint256 reserve1After = reserve1 - amountOut;
-        
-        // Estimate input using initial price (inverse of price)
-        // amountIn ≈ amountOut / price
-        uint256 estimatedAmountIn = uint256((int256(amountOut) * 1e18) / priceSYBefore);
-        uint256 reserve0After = reserve0 + estimatedAmountIn;
-        
-        uint256 totalReserveAfter = reserve0After + reserve1After;
-        
-        // Calculate portion_PT after swap
-        uint256 portionPTAfter = (reserve1After * 1e18) / totalReserveAfter;
-        
-        // Calculate Price_SY_After
-        int256 priceSYAfter = calculatePrice(portionPTAfter, rateScalar, rateAnchor);
-        
-        // Calculate average price
-        int256 avgPrice = (priceSYBefore + priceSYAfter) / 2;
-        
-        // Re-calculate final input amount (SY) using average price
-        amountIn = uint256((int256(amountOut) * 1e18) / avgPrice);
-        
-        return amountIn;
+        bool /* zeroForOne */
+    ) internal view virtual returns (uint256 /* amountIn */) {
+        // This function won't be called since we restrict to exactInput only
+        revert ExactInputOnly();
     }
     
     /**
      * @notice Calculate output amount (in the form of liquidity/shares) for given token amounts
+     * @dev Updated to use Uniswap V2 style formula
      */
     function _getAmountIn(AddLiquidityParams memory params)
         internal
@@ -285,14 +245,28 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         amount0 = params.amount0Desired;
         amount1 = params.amount1Desired;
         
-        // Calculate liquidity based on 50/50 weighting
-        liquidity = (amount0 + amount1) / 2;
+        // Uniswap V2 style liquidity calculation
+        uint256 _totalSupply = totalSupply();
+        
+        if (_totalSupply == 0) {
+            // First liquidity provision
+            liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
+        } else {
+            // Subsequent liquidity provisions
+            liquidity = Math.min(
+                (amount0 * _totalSupply) / reserveSY, 
+                (amount1 * _totalSupply) / reservePT
+            );
+        }
+        
+        if (liquidity <= 0) revert InsufficientLiquidity();
         
         return (amount0, amount1, liquidity);
     }
     
     /**
      * @notice Calculate token amounts to return for given liquidity amount
+     * @dev Simple pro-rata calculation
      */
     function _getAmountOut(RemoveLiquidityParams memory params)
         internal
@@ -300,12 +274,119 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         override
         returns (uint256 amount0, uint256 amount1, uint256 liquidity)
     {
-        // Simple 50/50 split for removed liquidity
-        amount0 = params.liquidity / 2;
-        amount1 = params.liquidity / 2;
         liquidity = params.liquidity;
+        uint256 _totalSupply = totalSupply();
+        
+        // Calculate proportional share of reserves
+        amount0 = (reserveSY * liquidity) / _totalSupply;
+        amount1 = (reservePT * liquidity) / _totalSupply;
         
         return (amount0, amount1, liquidity);
+    }
+    
+    /**
+     * @notice Process after liquidity is added to update our tracked reserves
+     */
+    function _afterAddLiquidity(
+        address /* sender */,
+        PoolKey calldata /* key */,
+        IPoolManager.ModifyLiquidityParams calldata /* params */,
+        BalanceDelta delta,
+        BalanceDelta /* feeDelta */,
+        bytes calldata /* hookData */
+    ) internal override returns (bytes4, BalanceDelta) {
+        // Update reserves based on the delta
+        // delta amounts are negative when tokens are added to the pool
+        if (delta.amount0() < 0) {
+            // Converting -delta.amount0() to positive uint256
+            reserveSY += uint256(int256(-delta.amount0()));
+        } else {
+            // delta.amount0() is already positive
+            reserveSY -= uint256(int256(delta.amount0()));
+        }
+        
+        if (delta.amount1() < 0) {
+            // Converting -delta.amount1() to positive uint256
+            reservePT += uint256(int256(-delta.amount1()));
+        } else {
+            // delta.amount1() is already positive
+            reservePT -= uint256(int256(delta.amount1()));
+        }
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
+        // First liquidity provision - mint MINIMUM_LIQUIDITY to address(0)
+        if (totalSupply() == MINIMUM_LIQUIDITY) {
+            super._mint(address(0), MINIMUM_LIQUIDITY);
+        }
+        
+        return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+    }
+    
+    /**
+     * @notice Process after liquidity is removed to update our tracked reserves
+     */
+    function _afterRemoveLiquidity(
+        address /* sender */,
+        PoolKey calldata /* key */,
+        IPoolManager.ModifyLiquidityParams calldata /* params */,
+        BalanceDelta delta,
+        BalanceDelta /* feeDelta */,
+        bytes calldata /* hookData */
+    ) internal override returns (bytes4, BalanceDelta) {
+        // Update reserves based on the delta
+        // delta amounts are positive when tokens are removed from the pool
+        if (delta.amount0() > 0) {
+            // delta.amount0() is already positive
+            reserveSY -= uint256(int256(delta.amount0()));
+        } else {
+            // Converting -delta.amount0() to positive uint256
+            reserveSY += uint256(int256(-delta.amount0()));
+        }
+        
+        if (delta.amount1() > 0) {
+            // delta.amount1() is already positive
+            reservePT -= uint256(int256(delta.amount1()));
+        } else {
+            // Converting -delta.amount1() to positive uint256
+            reservePT += uint256(int256(-delta.amount1()));
+        }
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
+        return (this.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+    }
+    
+    /**
+     * @notice Process after swap to update our tracked reserves
+     */
+    function _afterSwap(
+        address /* sender */,
+        PoolKey calldata /* key */,
+        IPoolManager.SwapParams calldata /* params */,
+        BalanceDelta delta,
+        bytes calldata /* hookData */
+    ) internal override returns (bytes4, int128) {
+        // Update reserves based on the swap delta
+        if (delta.amount0() > 0) {
+            // delta.amount0() is already positive
+            reserveSY -= uint256(int256(delta.amount0()));
+        } else {
+            // Converting -delta.amount0() to positive uint256
+            reserveSY += uint256(int256(-delta.amount0()));
+        }
+        
+        if (delta.amount1() > 0) {
+            // delta.amount1() is already positive
+            reservePT -= uint256(int256(delta.amount1()));
+        } else {
+            // Converting -delta.amount1() to positive uint256
+            reservePT += uint256(int256(-delta.amount1()));
+        }
+        
+        emit ReservesUpdated(reserveSY, reservePT);
+        
+        return (this.afterSwap.selector, 0);
     }
     
     /**
@@ -316,6 +397,14 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
         virtual
         override
     {
+        // First liquidity provision requires minting MINIMUM_LIQUIDITY to address(0)
+        uint256 _totalSupply = totalSupply();
+        if (_totalSupply == 0) {
+            super._mint(address(0), MINIMUM_LIQUIDITY);
+            // Reduce shares by MINIMUM_LIQUIDITY that was sent to address(0)
+            shares -= MINIMUM_LIQUIDITY;
+        }
+        
         _mint(params.to, shares);
     }
     
@@ -338,5 +427,27 @@ contract YieldSwapHook is BaseCustomCurve, ERC20 {
      */
     function getQuote(PoolKey calldata key, uint256 sYAmount) external view returns (uint256 ptAmount) {
         return _getAmountOutFromExactInput(sYAmount, key.currency0, key.currency1, true);
+    }
+    
+    /**
+     * @notice Set hook permissions to include afterAddLiquidity, afterRemoveLiquidity, and afterSwap
+     */
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: true,
+            afterInitialize: false,
+            beforeAddLiquidity: true,
+            beforeRemoveLiquidity: true,
+            afterAddLiquidity: true,  // Add this permission
+            afterRemoveLiquidity: true, // Add this permission
+            beforeSwap: true,
+            afterSwap: true,  // Add this permission
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: true,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
     }
 }
