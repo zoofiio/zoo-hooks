@@ -35,7 +35,8 @@ contract YieldSwapHookTest is Test, Deployers {
         uint24 fee
     );
 
-    event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
+    // Update event signature to match the contract
+    event ParametersUpdated(uint256 epochStart, uint256 epochDuration);
     event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
 
     Protocol protocol;
@@ -48,6 +49,10 @@ contract YieldSwapHookTest is Test, Deployers {
     int24 constant MAX_TICK = 887220;
 
     PoolId id;
+
+    // Epoch-related constants for testing
+    uint256 constant DEFAULT_EPOCH_START = 1000; // Fixed timestamp instead of block.timestamp
+    uint256 constant DEFAULT_EPOCH_DURATION = 7 days; // 1 week duration
 
     function setUp() public {
         deployFreshManagerAndRouters();
@@ -64,7 +69,10 @@ contract YieldSwapHookTest is Test, Deployers {
                 )
             )
         );
-        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(address(protocol), manager), address(hook));
+        // Updated constructor call with epoch parameters
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", 
+            abi.encode(address(protocol), manager, DEFAULT_EPOCH_START, DEFAULT_EPOCH_DURATION), 
+            address(hook));
 
         deployMintAndApprove2Currencies();
         (key, id) = initPool(currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
@@ -92,9 +100,8 @@ contract YieldSwapHookTest is Test, Deployers {
     }
 
     function test_initial_state() public view {
-        // Verify default parameters
-        assertEq(hook.rateScalar(), hook.DEFAULT_RATE_SCALAR());
-        assertEq(hook.rateAnchor(), hook.DEFAULT_RATE_ANCHOR());
+        // Get current rate parameters based on time
+        (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) = hook.getCurrentRateParameters();
         
         // Verify initial liquidity and reserves are zero
         assertEq(hook.totalSupply(), 0);
@@ -104,6 +111,10 @@ contract YieldSwapHookTest is Test, Deployers {
         
         // Verify owner
         assertEq(hook.owner(), address(this));
+
+        // Verify epoch parameters
+        assertEq(hook.epochStart(), DEFAULT_EPOCH_START);
+        assertEq(hook.epochDuration(), DEFAULT_EPOCH_DURATION);
     }
     
     // Test add liquidity functionality
@@ -525,47 +536,14 @@ contract YieldSwapHookTest is Test, Deployers {
         assertFalse(rateSmall == rateLarge);
     }
     
-    function test_setPoolParameters() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 newScalar = 200;
-        int256 newAnchor = 1.2e18;
-        
-        vm.expectEmit(true, true, false, false);
-        emit ParametersUpdated(newScalar, newAnchor);
-        
-        hook.setPoolParameters(key, newScalar, newAnchor);
-        
-        assertEq(hook.rateScalar(), newScalar);
-        assertEq(hook.rateAnchor(), newAnchor);
-        
-        uint256 syAmount = 10 ether;
-        uint256 ptBefore = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        
-        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
-        
-        uint256 expectedWithNewParams = hook.getQuote(key, syAmount);
-        assertApproxEqRel(ptReceived, expectedWithNewParams, 1e15);
-    }
-    
     function test_ownership_control() public {
         assertEq(hook.owner(), address(this));
         
         address user1 = address(0x1234);
         vm.startPrank(user1);
         vm.expectRevert();
-        hook.setPoolParameters(key, 200, 1.2e18);
+        // Fix to call setEpochParameters instead of setHookParameters
+        hook.setEpochParameters(2000, 14 days);
         vm.stopPrank();
         
         address newOwner = address(0x5678);
@@ -573,11 +551,13 @@ contract YieldSwapHookTest is Test, Deployers {
         assertEq(hook.owner(), newOwner);
         
         vm.expectRevert();
-        hook.setPoolParameters(key, 200, 1.2e18);
+        // Fix to call setEpochParameters instead of setHookParameters
+        hook.setEpochParameters(2000, 14 days);
         
         vm.startPrank(newOwner);
-        hook.setPoolParameters(key, 200, 1.2e18);
-        assertEq(hook.rateScalar(), 200);
+        // Fix to call setEpochParameters instead of setHookParameters
+        hook.setEpochParameters(2000, 14 days);
+        assertEq(hook.epochStart(), 2000);
         vm.stopPrank();
     }
     
@@ -696,8 +676,8 @@ contract YieldSwapHookTest is Test, Deployers {
         uint256 lp2SYReceived = key.currency0.balanceOf(lp2) - lp2SYBefore;
         uint256 lp2PTReceived = key.currency1.balanceOf(lp2) - lp2PTBefore;
         
-        assertApproxEqRel(lp2SYReceived, lp1SYReceived * 3 / 2, 0.01e18); // 允许1%误差
-        assertApproxEqRel(lp2PTReceived, lp1PTReceived * 3 / 2, 0.01e18); // 允许1%误差
+        assertApproxEqRel(lp2SYReceived, lp1SYReceived * 3 / 2, 0.01e18);
+        assertApproxEqRel(lp2PTReceived, lp1PTReceived * 3 / 2, 0.01e18);
     }
     
     function test_volume_impact_on_price() public {
@@ -780,5 +760,232 @@ contract YieldSwapHookTest is Test, Deployers {
                 );
             }
         }
+    }
+
+    // Test initial epoch parameters
+    function test_initial_epoch_parameters() public view {
+        // Verify epoch parameters
+        assertEq(hook.epochStart(), DEFAULT_EPOCH_START);
+        assertEq(hook.epochDuration(), DEFAULT_EPOCH_DURATION);
+        
+        // Verify constants
+        assertEq(hook.SCALAR_ROOT(), 200);
+        assertEq(hook.ANCHOR_ROOT(), 1.2e18);
+        assertEq(hook.ANCHOR_BASE(), 1e18);
+    }
+
+    // Test getting current rate parameters at epoch start
+    function test_getCurrentRateParameters_at_start() public view {
+        // At epoch start, t should be 1
+        (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) = hook.getCurrentRateParameters();
+        
+        assertEq(t, 1e18); // t = 1 with 18 decimals of precision
+        assertEq(currentRateScalar, 200); // SCALAR_ROOT / 1 = 200
+        assertEq(currentRateAnchor, 1.2e18); // (1.2 - 1) * 1 + 1 = 1.2
+    }
+    
+    // Test getting current rate parameters in the middle of epoch
+    function test_getCurrentRateParameters_middle() public {
+        // Warp to the middle of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
+        
+        // At middle of epoch, t should be 0.5
+        (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) = hook.getCurrentRateParameters();
+        
+        assertEq(t, 5e17); // t = 0.5 with 18 decimals precision
+        assertEq(currentRateScalar, 400); // SCALAR_ROOT / 0.5 = 400
+        assertEq(currentRateAnchor, 1.1e18); // (1.2 - 1) * 0.5 + 1 = 1.1
+    }
+    
+    // Test getting current rate parameters at epoch end
+    function test_getCurrentRateParameters_end() public {
+        // Warp to end of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
+        
+        // At end of epoch, t should be 0
+        (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) = hook.getCurrentRateParameters();
+        
+        assertEq(t, 0); // t = 0
+        // When t=0, scalar should be a very large number and anchor should be 1.0
+        assertTrue(currentRateScalar > 0); // Just check it's not zero
+        assertEq(currentRateAnchor, 1e18); // Should be 1.0
+    }
+    
+    // Test setting epoch parameters
+    function test_setEpochParameters() public {
+        // New epoch parameters
+        uint256 newEpochStart = block.timestamp + 1 days;
+        uint256 newEpochDuration = 14 days;
+        
+        vm.expectEmit(true, true, false, false);
+        emit ParametersUpdated(newEpochStart, newEpochDuration);
+        
+        hook.setEpochParameters(newEpochStart, newEpochDuration);
+        
+        // Verify parameters were updated
+        assertEq(hook.epochStart(), newEpochStart);
+        assertEq(hook.epochDuration(), newEpochDuration);
+        
+        // Verify effect on rate parameters
+        (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) = hook.getCurrentRateParameters();
+        
+        // Since we're now before the epoch start, t should be 1
+        assertEq(t, 1e18);
+        assertEq(currentRateScalar, 200);
+        assertEq(currentRateAnchor, 1.2e18);
+        
+        // Warp to middle of new epoch
+        vm.warp(newEpochStart + newEpochDuration / 2);
+        
+        // Check parameters again
+        (t, currentRateScalar, currentRateAnchor) = hook.getCurrentRateParameters();
+        
+        assertEq(t, 5e17); // t = 0.5
+        assertEq(currentRateScalar, 400); // 200 / 0.5 = 400
+        assertEq(currentRateAnchor, 1.1e18); // (1.2 - 1) * 0.5 + 1 = 1.1
+    }
+    
+    // Test swap parameters change over time
+    function test_swap_pricing_over_time() public {
+        // Add liquidity
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // Amount to swap
+        uint256 syAmount = 10 ether;
+        
+        // Get quote at beginning of epoch
+        uint256 quoteStart = hook.getQuote(key, syAmount);
+        
+        // Time travel to middle of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
+        
+        // Get quote at middle of epoch
+        uint256 quoteMid = hook.getQuote(key, syAmount);
+        
+        // Time travel to end of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
+        
+        // Get quote at end of epoch
+        uint256 quoteEnd = hook.getQuote(key, syAmount);
+        
+        // As time progresses:
+        // - rateScalar increases (200 -> 400 -> very large)
+        // - rateAnchor decreases (1.2 -> 1.1 -> 1.0)
+        
+        // This should result in a decreasing amount of PT received over time
+        console.log("PT quote at start:", quoteStart);
+        console.log("PT quote at middle:", quoteMid);
+        console.log("PT quote at end:", quoteEnd);
+        
+        assertTrue(quoteMid < quoteStart, "PT amount should decrease as time passes");
+        assertTrue(quoteEnd < quoteMid, "PT amount should decrease as time passes");
+    }
+    
+    // Test performing actual swaps at different times
+    function test_swap_execution_over_time() public {
+        // Add liquidity
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 syAmount = 10 ether;
+        
+        // Execute swap at start
+        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        
+        uint256 ptReceived1 = key.currency1.balanceOf(address(this)) - ptBefore1;
+        
+        // Time travel to middle of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
+        
+        // Execute swap at middle
+        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        uint256 ptReceived2 = key.currency1.balanceOf(address(this)) - ptBefore2;
+        
+        // Time travel to end of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
+        
+        // Execute swap at end
+        uint256 ptBefore3 = key.currency1.balanceOf(address(this));
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        uint256 ptReceived3 = key.currency1.balanceOf(address(this)) - ptBefore3;
+        
+        console.log("PT received at start:", ptReceived1);
+        console.log("PT received at middle:", ptReceived2);
+        console.log("PT received at end:", ptReceived3);
+        
+        // Verify that PT received decreases over time
+        assertTrue(ptReceived2 < ptReceived1, "PT received should decrease as time passes");
+        assertTrue(ptReceived3 < ptReceived2, "PT received should decrease as time passes");
+    }
+    
+    // Test setting invalid epoch parameters
+    function test_setEpochParameters_reverts() public {
+        // Try to set an epoch with zero duration
+        vm.expectRevert(YieldSwapHook.InvalidEpochParameters.selector);
+        hook.setEpochParameters(block.timestamp, 0);
+    }
+    
+    // Replace test_setPoolParameters with our new epoch-based parameters test
+    function test_setEpochParameters_effect() public {
+        // Add liquidity
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // Get quote before change
+        uint256 syAmount = 10 ether;
+        uint256 quoteBeforeChange = hook.getQuote(key, syAmount);
+        
+        // Set to a specific block time to have predictable behavior
+        uint256 testTime = block.timestamp;
+        vm.warp(testTime);
+        
+        // Update parameters to move slightly into the epoch (instead of dramatically)
+        // This avoids extreme values that might cause arithmetic issues
+        uint256 newEpochStart = testTime - 1 days; // Only 1 day in the past
+        uint256 newEpochDuration = 7 days;
+        
+        hook.setEpochParameters(newEpochStart, newEpochDuration);
+        
+        // Get quote after change - we're now ~1/7 of the way through the epoch
+        uint256 quoteAfterChange = hook.getQuote(key, syAmount);
+        
+        // Since we're slightly into the epoch, prices should be slightly different
+        // but not dramatically so - this avoids potential arithmetic issues
+        assertTrue(quoteAfterChange < quoteBeforeChange, "PT amount should decrease with updated epoch parameters");
+        console.log("Quote before:", quoteBeforeChange);
+        console.log("Quote after:", quoteAfterChange);
+        
+        // Execute swap with new parameters
+        uint256 ptBefore = key.currency1.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        
+        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
+        
+        // Verify the actual received amount matches the quote
+        assertApproxEqRel(ptReceived, quoteAfterChange, 1e15); // Accept 0.1% error
     }
 }

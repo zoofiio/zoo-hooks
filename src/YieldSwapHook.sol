@@ -35,13 +35,14 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     using TransientStateLibrary for IPoolManager;
     using BalanceDeltaLibrary for BalanceDelta;
     
-    // Parameters for the pricing formula (for single pool)
-    uint256 public rateScalar;   // Denominator parameter in the pricing formula
-    int256 public rateAnchor;    // Constant offset in the pricing formula
+    // Epoch parameters
+    uint256 public epochStart;    // Epoch start time in seconds
+    uint256 public epochDuration; // Epoch duration in seconds
     
-    // Default parameters (can be overridden by the owner)
-    uint256 public constant DEFAULT_RATE_SCALAR = 100; // Default rate scalar
-    int256 public constant DEFAULT_RATE_ANCHOR = 1.1e18; // Default rate anchor (1.1 with 18 decimals)
+    // Constants for rate calculations
+    uint256 public constant SCALAR_ROOT = 200;       // Base value for rateScalar
+    int256 public constant ANCHOR_ROOT = 1.2e18;     // Base value for rateAnchor (1.2 with 18 decimals)
+    int256 public constant ANCHOR_BASE = 1e18;       // Base value (1.0 with 18 decimals)
     
     // Track reserves manually
     uint256 public reserveSY;    // Reserve of SY tokens (token0)
@@ -52,25 +53,67 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     
     // Error declarations
     error OnlySYToPTSwapsSupported();
-    error InvalidPoolConfiguration();
+    error InvalidHookConfiguration();
     error MathError();
     error InsufficientPTReserves();
-    error ExactInputOnly();      // New error for exact input only swaps
+    error ExactInputOnly();
     error InsufficientLiquidity();
+    error InvalidEpochParameters();
     
-    event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
+    event ParametersUpdated(uint256 epochStart, uint256 epochDuration);
     event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
     
-    constructor(address _protocol, IPoolManager _poolManager) 
+    constructor(address _protocol, IPoolManager _poolManager, uint256 _epochStart, uint256 _epochDuration) 
         ProtocolOwner(_protocol)
         ZooCustomCurve(_poolManager) 
         ERC20("YieldSwap Liquidity", "YSL") 
     {
-        rateScalar = DEFAULT_RATE_SCALAR;
-        rateAnchor = DEFAULT_RATE_ANCHOR;
+        // Validate and set epoch parameters
+        if (_epochDuration == 0) revert InvalidEpochParameters();
+        epochStart = _epochStart;
+        epochDuration = _epochDuration;
+        
         // Reserves start at 0
         reserveSY = 0;
         reservePT = 0;
+    }
+    
+    /**
+     * @notice Calculate current time factor and rate parameters
+     * @dev Time factor t: linear from 1 at epochStart to 0 after epochDuration
+     * @return t Current time factor
+     * @return currentRateScalar Current scalar parameter
+     * @return currentRateAnchor Current anchor parameter
+     */
+    function getCurrentRateParameters() public view returns (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) {
+        uint256 currentTime = block.timestamp;
+        
+        if (currentTime <= epochStart) {
+            // Before or at epoch start, t = 1
+            t = 1e18; // Use 18 decimals for precision
+        } else if (currentTime >= epochStart + epochDuration) {
+            // After epoch end, t = 0
+            t = 0;
+        } else {
+            // During epoch, linearly decrease from 1 to 0
+            uint256 timeElapsed = currentTime - epochStart;
+            t = ((epochDuration - timeElapsed) * 1e18) / epochDuration;
+        }
+        
+        // Handle division by zero case
+        if (t == 0) {
+            // When t=0, set a maximum reasonable value for scalar
+            currentRateScalar = type(uint256).max / 2; // Avoid extreme values
+            currentRateAnchor = ANCHOR_BASE; // 1.0 in 18 decimals
+        } else {
+            // Calculate rateScalar = ScalarRoot / t
+            currentRateScalar = (SCALAR_ROOT * 1e18) / t;
+            
+            // Calculate rateAnchor = (AnchorRoot - 1) * t + 1
+            currentRateAnchor = ((ANCHOR_ROOT - ANCHOR_BASE) * int256(t)) / 1e18 + ANCHOR_BASE;
+        }
+        
+        return (t, currentRateScalar, currentRateAnchor);
     }
     
     // Externally visible helper function to get reserves for testing
@@ -78,30 +121,33 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         return (reserveSY, reservePT);
     }
     
-    // Allow owner to set parameters for the pool
-    function setPoolParameters(PoolKey calldata, uint256 _rateScalar, int256 _rateAnchor) external onlyOwner {
-        // Instead of checking initialized, check if poolKey is set
-        if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
+    /**
+     * @notice Allow owner to update epoch parameters
+     * @param _epochStart New epoch start time
+     * @param _epochDuration New epoch duration
+     */
+    function setEpochParameters(uint256 _epochStart, uint256 _epochDuration) external onlyOwner {
+        // Basic validation
+        if (_epochDuration == 0) revert InvalidEpochParameters();
         
-        if (_rateScalar == 0) revert InvalidPoolConfiguration();
+        epochStart = _epochStart;
+        epochDuration = _epochDuration;
         
-        rateScalar = _rateScalar;
-        rateAnchor = _rateAnchor;
-        
-        emit ParametersUpdated(_rateScalar, _rateAnchor);
+        emit ParametersUpdated(_epochStart, _epochDuration);
     }
     
     /**
      * @notice Helper function to calculate price using the formula
      * @dev Price_SY = (1 / RateScalar) * ln (Portion_PT / (1 - Portion_PT)) + RateAnchor
      * @param portionPT Portion of PT tokens in the pool (scaled by 1e18)
-     * @param scalarParam Rate scalar parameter
-     * @param anchorParam Rate anchor parameter
      * @return Calculated price (scaled by 1e18)
      */
-    function calculatePrice(uint256 portionPT, uint256 scalarParam, int256 anchorParam) internal pure returns (int256) {
+    function calculatePrice(uint256 portionPT) internal view returns (int256) {
+        // Get current rate parameters based on time
+        (, uint256 currentRateScalar, int256 currentRateAnchor) = getCurrentRateParameters();
+        
         // Handle edge cases to avoid division by zero or log of zero/negative
-        if (portionPT == 0) return anchorParam;
+        if (portionPT == 0) return currentRateAnchor;
         if (portionPT >= 1e18) revert MathError(); // Portion PT should be less than 1
         
         // Calculate ln(portion_PT / (1 - portion_PT))
@@ -113,14 +159,13 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         int256 logTerm = int256(MathLibrary.ln(numerator * 1e18)) - int256(MathLibrary.ln(denominator * 1e18));
         console.log("YieldSwapHook: calculatePrice, ln(numerator): ", numerator * 1e18, MathLibrary.ln(numerator * 1e18));
         console.log("YieldSwapHook: calculatePrice, ln(denominator): ", denominator * 1e18, MathLibrary.ln(denominator * 1e18));
-
         console.log("YieldSwapHook: calculatePrice, logTerm: ", logTerm);
         
         // Calculate (1 / rateScalar) * ln(...)
-        int256 scaledLog = logTerm / int256(scalarParam);
+        int256 scaledLog = logTerm / int256(currentRateScalar);
         
-        // Final formula: scaled_log + rateAnchor
-        return scaledLog + anchorParam;
+        // Final formula: scaled_log + currentRateAnchor
+        return scaledLog + currentRateAnchor;
     }
 
     /**
@@ -169,13 +214,13 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         uint256 reserve1 = reservePT;
         
         uint256 totalReserve = reserve0 + reserve1;
-        if (totalReserve == 0) revert InvalidPoolConfiguration();
+        if (totalReserve == 0) revert InvalidHookConfiguration();
         
         // Calculate portion_PT before swap
         uint256 portionPTBefore = (reserve1 * 1e18) / totalReserve;
         
-        // Calculate Price_SY_Before
-        int256 priceSYBefore = calculatePrice(portionPTBefore, rateScalar, rateAnchor);
+        // Calculate Price_SY_Before using current time-based parameters
+        int256 priceSYBefore = calculatePrice(portionPTBefore);
         
         // Calculate reserves after swap
         uint256 reserve0After = reserve0 + amountIn;
@@ -191,8 +236,8 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         // Calculate portion_PT after swap
         uint256 portionPTAfter = (reserve1After * 1e18) / totalReserveAfter;
         
-        // Calculate Price_SY_After
-        int256 priceSYAfter = calculatePrice(portionPTAfter, rateScalar, rateAnchor);
+        // Calculate Price_SY_After using current time-based parameters
+        int256 priceSYAfter = calculatePrice(portionPTAfter);
         
         // Calculate average price
         int256 avgPrice = (priceSYBefore + priceSYAfter) / 2;
