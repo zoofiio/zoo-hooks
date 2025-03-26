@@ -317,95 +317,6 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     }
     
     /**
-     * @notice Process after liquidity is added to update our tracked reserves
-     */
-    function _afterAddLiquidity(
-        address /* sender */,
-        PoolKey calldata /* key */,
-        IPoolManager.ModifyLiquidityParams calldata /* params */,
-        BalanceDelta delta,
-        BalanceDelta /* feeDelta */,
-        bytes calldata /* hookData */
-    ) internal override returns (bytes4, BalanceDelta) {
-        // Update reserves based on the delta
-        // delta amounts are negative when tokens are added to the pool
-        if (delta.amount0() < 0) {
-            // Converting -delta.amount0() to positive uint256
-            reserveSY += uint256(int256(-delta.amount0()));
-        } else {
-            // delta.amount0() is already positive
-            reserveSY -= uint256(int256(delta.amount0()));
-        }
-        
-        if (delta.amount1() < 0) {
-            // Converting -delta.amount1() to positive uint256
-            reservePT += uint256(int256(-delta.amount1()));
-        } else {
-            // delta.amount1() is already positive
-            reservePT -= uint256(int256(delta.amount1()));
-        }
-        
-        emit ReservesUpdated(reserveSY, reservePT);
-        
-        // First liquidity provision - mint MINIMUM_LIQUIDITY to the contract itself instead of address(0)
-        if (totalSupply() == MINIMUM_LIQUIDITY) {
-            super._mint(address(this), MINIMUM_LIQUIDITY);
-        }
-        
-        return (this.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
-    }
-    
-    /**
-     * @notice Process after liquidity is removed to update our tracked reserves
-     */
-    function _afterRemoveLiquidity(
-        address /* sender */,
-        PoolKey calldata /* key */,
-        IPoolManager.ModifyLiquidityParams calldata /* params */,
-        BalanceDelta delta,
-        BalanceDelta /* feeDelta */,
-        bytes calldata /* hookData */
-    ) internal override returns (bytes4, BalanceDelta) {
-        // Update reserves based on the delta
-        // delta amounts are positive when tokens are removed from the pool
-        if (delta.amount0() > 0) {
-            // delta.amount0() is already positive
-            reserveSY -= uint256(int256(delta.amount0()));
-        } else {
-            // Converting -delta.amount0() to positive uint256
-            reserveSY += uint256(int256(-delta.amount0()));
-        }
-        
-        if (delta.amount1() > 0) {
-            // delta.amount1() is already positive
-            reservePT -= uint256(int256(delta.amount1()));
-        } else {
-            // Converting -delta.amount1() to positive uint256
-            reservePT += uint256(int256(-delta.amount1()));
-        }
-        
-        emit ReservesUpdated(reserveSY, reservePT);
-        
-        return (this.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
-    }
-    
-    /**
-     * @notice Process after swap to update our tracked reserves
-     * @dev We're now updating reserves in _beforeSwap, so this just returns the proper selector
-     */
-    function _afterSwap(
-        address,
-        PoolKey calldata,
-        IPoolManager.SwapParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) internal pure override returns (bytes4, int128) {
-        // Since we're already updating reserves in _beforeSwap
-        // We don't need to update them again here
-        return (this.afterSwap.selector, 0);
-    }
-    
-    /**
      * @notice Mint liquidity shares using ERC20 functionality
      */
     function _mint(AddLiquidityParams memory params, BalanceDelta delta, uint256 shares) 
@@ -482,10 +393,10 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
             afterInitialize: false,
             beforeAddLiquidity: true,
             beforeRemoveLiquidity: true,
-            afterAddLiquidity: true,  // Add this permission
-            afterRemoveLiquidity: true, // Add this permission
+            afterAddLiquidity: false,
+            afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,  // Add this permission
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: true,
