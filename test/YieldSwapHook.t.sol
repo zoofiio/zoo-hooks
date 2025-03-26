@@ -18,6 +18,7 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {ZooCustomAccounting} from "src/base/ZooCustomAccounting.sol";
+import {Protocol} from "src/Protocol.sol";
 
 contract YieldSwapHookTest is Test, Deployers {
     using SafeCast for uint256;
@@ -37,6 +38,7 @@ contract YieldSwapHookTest is Test, Deployers {
     event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
     event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
 
+    Protocol protocol;
     YieldSwapHook hook;
 
     uint256 constant MAX_DEADLINE = 12329839823;
@@ -50,6 +52,7 @@ contract YieldSwapHookTest is Test, Deployers {
     function setUp() public {
         deployFreshManagerAndRouters();
 
+        protocol = new Protocol();
         hook = YieldSwapHook(
             address(
                 uint160(
@@ -64,7 +67,7 @@ contract YieldSwapHookTest is Test, Deployers {
                 )
             )
         );
-        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(manager), address(hook));
+        deployCodeTo("src/YieldSwapHook.sol:YieldSwapHook", abi.encode(address(protocol), manager), address(hook));
 
         deployMintAndApprove2Currencies();
         (key, id) = initPool(currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, SQRT_PRICE_1_1);
@@ -564,15 +567,15 @@ contract YieldSwapHookTest is Test, Deployers {
         
         address user1 = address(0x1234);
         vm.startPrank(user1);
-        vm.expectRevert(YieldSwapHook.OnlyOwner.selector);
+        vm.expectRevert();
         hook.setPoolParameters(key, 200, 1.2e18);
         vm.stopPrank();
         
         address newOwner = address(0x5678);
-        hook.transferOwnership(newOwner);
+        protocol.transferOwnership(newOwner);
         assertEq(hook.owner(), newOwner);
         
-        vm.expectRevert(YieldSwapHook.OnlyOwner.selector);
+        vm.expectRevert();
         hook.setPoolParameters(key, 200, 1.2e18);
         
         vm.startPrank(newOwner);

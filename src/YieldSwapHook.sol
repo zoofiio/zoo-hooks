@@ -11,20 +11,21 @@ import {BeforeSwapDelta, toBeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-cor
 import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
-import {MathLibrary} from "./libraries/MathLibrary.sol";
+import {MathLibrary} from "src/libraries/MathLibrary.sol";
 import {Math} from "openzeppelin/utils/math/Math.sol";
 import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 import {ZooCustomCurve} from "src/base/ZooCustomCurve.sol";
 import {CurrencySettler} from "src/utils/CurrencySettler.sol";
+import {ProtocolOwner} from "src/ProtocolOwner.sol";
 
 /**
  * @title YieldSwapHook
  * @notice A custom AMM Hook for yield products based on Uniswap V4
  * @dev Provides custom pricing logic for SY and PT tokens
  */
-contract YieldSwapHook is ZooCustomCurve, ERC20 {
+contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using CurrencySettler for Currency; // Add this line to enable take() and settle() methods
@@ -42,9 +43,6 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
     uint256 public constant DEFAULT_RATE_SCALAR = 100; // Default rate scalar
     int256 public constant DEFAULT_RATE_ANCHOR = 1.1e18; // Default rate anchor (1.1 with 18 decimals)
     
-    // Owner address to control parameter settings
-    address public owner;
-    
     // Track reserves manually
     uint256 public reserveSY;    // Reserve of SY tokens (token0)
     uint256 public reservePT;    // Reserve of PT tokens (token1)
@@ -57,18 +55,17 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
     error InvalidPoolConfiguration();
     error MathError();
     error InsufficientPTReserves();
-    error OnlyOwner();
     error ExactInputOnly();      // New error for exact input only swaps
     error InsufficientLiquidity();
     
     event ParametersUpdated(uint256 rateScalar, int256 rateAnchor);
     event ReservesUpdated(uint256 reserveSY, uint256 reservePT);
     
-    constructor(IPoolManager _poolManager) 
+    constructor(address _protocol, IPoolManager _poolManager) 
+        ProtocolOwner(_protocol)
         ZooCustomCurve(_poolManager) 
         ERC20("YieldSwap Liquidity", "YSL") 
     {
-        owner = msg.sender;
         rateScalar = DEFAULT_RATE_SCALAR;
         rateAnchor = DEFAULT_RATE_ANCHOR;
         // Reserves start at 0
@@ -76,19 +73,9 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
         reservePT = 0;
     }
     
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert OnlyOwner();
-        _;
-    }
-
     // Externally visible helper function to get reserves for testing
     function getReserves(PoolKey calldata /* key */) external view returns (uint256 reserve0, uint256 reserve1) {
         return (reserveSY, reservePT);
-    }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "New owner is the zero address");
-        owner = newOwner;
     }
     
     // Allow owner to set parameters for the pool
