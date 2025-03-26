@@ -407,12 +407,12 @@ contract YieldSwapHook is ZooCustomCurve, ERC20 {
      * @dev We're now updating reserves in _beforeSwap, so this just returns the proper selector
      */
     function _afterSwap(
-        address sender,
-        PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
-        BalanceDelta delta,
-        bytes calldata hookData
-    ) internal override returns (bytes4, int128) {
+        address,
+        PoolKey calldata,
+        IPoolManager.SwapParams calldata,
+        BalanceDelta,
+        bytes calldata
+    ) internal pure override returns (bytes4, int128) {
         // Since we're already updating reserves in _beforeSwap
         // We don't need to update them again here
         return (this.afterSwap.selector, 0);
