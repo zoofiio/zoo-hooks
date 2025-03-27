@@ -440,25 +440,4 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         return _getAmountOutFromExactInput(sYAmount, key.currency0, key.currency1, true);
     }
     
-    /**
-     * @notice Set hook permissions to include afterAddLiquidity, afterRemoveLiquidity, and afterSwap
-     */
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
-        return Hooks.Permissions({
-            beforeInitialize: true,
-            afterInitialize: false,
-            beforeAddLiquidity: true,
-            beforeRemoveLiquidity: true,
-            afterAddLiquidity: false,
-            afterRemoveLiquidity: false,
-            beforeSwap: true,
-            afterSwap: false,
-            beforeDonate: false,
-            afterDonate: false,
-            beforeSwapReturnDelta: true,
-            afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: false
-        });
-    }
 }
