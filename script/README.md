@@ -33,7 +33,7 @@ This will deploy Protocol, StandardYieldToken, PrincipalToken, and YieldSwapHook
 
 ```bash
 source .env
-forge script script/DeployContracts.s.sol --rpc-url $RPC_URL_SEPOLIA --broadcast --verify
+forge script script/DeployContracts.s.sol --rpc-url sepolia --broadcast --verify
 ```
 
 The script will automatically load the PRIVATE_KEY and other variables from your .env file. It will save the deployment information to the `./deployments/` directory.

@@ -16,3 +16,15 @@ verbosity = 4
 [fmt]
 line_length = 100
 number_underscore = "thousands"
+
+# Add RPC URL configuration
+[rpc_endpoints]
+sepolia = "${RPC_URL_SEPOLIA}"
+mainnet = "${RPC_URL_MAINNET}"
+base = "${RPC_URL_BASE}"
+
+# Add etherscan API key configuration
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
+mainnet = { key = "${ETHERSCAN_API_KEY}" }
+base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }

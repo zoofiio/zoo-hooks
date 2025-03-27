@@ -11,9 +11,13 @@ import {YieldSwapHook} from "src/YieldSwapHook.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
+import {Create2} from "openzeppelin/utils/Create2.sol";
+import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
 
 contract DeployContracts is Script {
     using stdJson for string;
+    
+    address constant UNISWAP_V4_CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     // Get Pool Manager address based on network or directly from .env
     function getPoolManagerAddress() internal view returns (address) {
@@ -212,9 +216,9 @@ contract DeployContracts is Script {
                 epochDuration
             );
 
-            // Find optimal salt - get the address of this script as the CREATE2_DEPLOYER
+            // Important: Use the standard Uniswap V4 CREATE2 factory address, NOT the deployer address
             (address expectedHookAddress, bytes32 salt) = HookMiner.find(
-                deployer,
+                UNISWAP_V4_CREATE2_FACTORY,  // Use our renamed constant
                 flags,
                 type(YieldSwapHook).creationCode,
                 constructorArgs
@@ -223,17 +227,25 @@ contract DeployContracts is Script {
             console.log("Mined salt:", uint256(salt));
             console.log("Expected hook address:", expectedHookAddress);
             
-            // Deploy YieldSwapHook with the mined salt
-            hook = new YieldSwapHook{salt: salt}(
-                address(protocol),
-                IPoolManager(poolManager),
-                epochStart,
-                epochDuration
+            // Get the initialization code with constructor arguments
+            bytes memory creationCode = abi.encodePacked(
+                type(YieldSwapHook).creationCode,
+                constructorArgs
+            );
+
+            // Deploy using CREATE2 factory instead of direct CREATE2 opcode
+            address deployedHook = Create2.deploy(
+                0, // No ETH value needed
+                salt,
+                creationCode
             );
             
-            // Verify the deployed address matches what we expected
-            require(address(hook) == expectedHookAddress, "Hook address mismatch");
+            console.log("Deployed hook address:", deployedHook);
             
+            // Verify successful deployment and address match
+            require(deployedHook == expectedHookAddress, "Hook address mismatch");
+            
+            hook = YieldSwapHook(deployedHook);
             console.log("YieldSwapHook deployed at:", address(hook));
             
             // Add to deployment JSON
