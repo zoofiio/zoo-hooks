@@ -10,6 +10,13 @@ viaIR = true
 optimizer = true
 optimizer_runs = 200
 
+# Add RPC URL configuration
+[rpc_endpoints]
+sepolia = "${RPC_URL_SEPOLIA}"
+mainnet = "${RPC_URL_MAINNET}"
+base = "${RPC_URL_BASE}"
+arbitrum = "${RPC_URL_ARBITRUM}" # Added Arbitrum One
+
 [profile.ci]
 verbosity = 4
 
@@ -17,14 +24,9 @@ verbosity = 4
 line_length = 100
 number_underscore = "thousands"
 
-# Add RPC URL configuration
-[rpc_endpoints]
-sepolia = "${RPC_URL_SEPOLIA}"
-mainnet = "${RPC_URL_MAINNET}"
-base = "${RPC_URL_BASE}"
-
 # Add etherscan API key configuration
 [etherscan]
 sepolia = { key = "${ETHERSCAN_API_KEY}" }
 mainnet = { key = "${ETHERSCAN_API_KEY}" }
 base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
+arbitrum = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api" } # Added Arbiscan

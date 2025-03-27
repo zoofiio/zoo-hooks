@@ -19,6 +19,15 @@ contract DeployContracts is Script {
     
     address constant UNISWAP_V4_CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
+    function getChainId(string memory network) internal pure returns (string memory) {
+        if (keccak256(bytes(network)) == keccak256(bytes("mainnet"))) return "1";
+        if (keccak256(bytes(network)) == keccak256(bytes("sepolia"))) return "11155111";
+        if (keccak256(bytes(network)) == keccak256(bytes("base"))) return "8453";
+        if (keccak256(bytes(network)) == keccak256(bytes("basegoerli"))) return "84531";
+        if (keccak256(bytes(network)) == keccak256(bytes("arbitrum"))) return "42161"; // Added Arbitrum One
+        return "11155111"; // Default to sepolia
+    }
+
     // Get Pool Manager address based on network or directly from .env
     function getPoolManagerAddress() internal view returns (address) {
         // First try to get a direct POOL_MANAGER_ADDRESS from .env
@@ -32,6 +41,8 @@ contract DeployContracts is Script {
                 return vm.envOr("POOL_MANAGER_SEPOLIA", address(0xE03A1074c86CFeDd5C142C4F04F1a1536e203543));
             } else if (keccak256(bytes(network)) == keccak256(bytes("mainnet"))) {
                 return vm.envOr("POOL_MANAGER_MAINNET", address(0x000000000004444c5dc75cB358380D2e3dE08A90));
+            } else if (keccak256(bytes(network)) == keccak256(bytes("arbitrum"))) {
+                return vm.envOr("POOL_MANAGER_ARBITRUM", address(0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32));
             }
             
             revert("Unsupported network or POOL_MANAGER_ADDRESS not set");
