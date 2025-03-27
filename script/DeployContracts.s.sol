@@ -57,43 +57,51 @@ contract DeployContracts is Script {
         
         // Check if the deployment file exists
         try vm.readFile(deploymentPath) returns (string memory json) {
-            // Use proper stdJson parsing
-            bytes memory rawAddress = stdJson.parseRaw(json, string(abi.encodePacked(".", contractName, ".address")));
-            if (rawAddress.length > 0) {
-                address contractAddress = abi.decode(rawAddress, (address));
-                return (true, contractAddress);
-            } else {
+            // Make sure the JSON is not empty and is valid
+            if (bytes(json).length == 0 || keccak256(bytes(json)) == keccak256(bytes("{}"))) {
+                return (false, address(0));
+            }
+            
+            // Use vm.parseJson directly - it returns bytes that need to be decoded
+            string memory addressPath = string(abi.encodePacked(".", contractName, ".address"));
+            
+            try vm.parseJson(json, addressPath) returns (bytes memory rawAddress) {
+                if (rawAddress.length > 0) {
+                    // Convert the bytes to an address
+                    address contractAddress = abi.decode(rawAddress, (address));
+                    return (true, contractAddress);
+                } else {
+                    return (false, address(0));
+                }
+            } catch {
                 return (false, address(0));
             }
         } catch {
-            // Deployment file doesn't exist
+            // Deployment file doesn't exist or can't be read
             return (false, address(0));
         }
     }
     
     // Save deployment information to network-specific file
-    function saveDeployment(string memory network, string memory deploymentJson) internal {
+    function saveDeployment(string memory network, string memory contractsJson) internal {
         string memory deploymentPath = getDeploymentPath(network);
-        string memory existingJson;
-        string memory finalJson;
         
-        // Try to read existing deployment file
-        try vm.readFile(deploymentPath) returns (string memory json) {
-            existingJson = json;
-            // Merge with existing JSON
-            vm.writeJson(deploymentJson, deploymentPath);
-            finalJson = vm.readFile(deploymentPath);
-        } catch {
-            // File doesn't exist, create it with current deployment
-            finalJson = deploymentJson;
-            vm.writeFile(deploymentPath, finalJson);
-        }
+        // Create directory if it doesn't exist
+        string[] memory mkdirCmd = new string[](3);
+        mkdirCmd[0] = "mkdir";
+        mkdirCmd[1] = "-p";
+        mkdirCmd[2] = "./deployments";
+        vm.ffi(mkdirCmd);
+        
+        // Directly write to the file, overwriting any existing content
+        // This is simpler and more reliable than trying to merge JSON objects
+        vm.writeFile(deploymentPath, contractsJson);
         
         // Also save to latest.json for convenience
-        // vm.writeFile("./deployments/latest.json", finalJson);
+        vm.writeFile("./deployments/latest.json", contractsJson);
         
         console.log("\nDeployment info saved to:");
-        // console.log("- ./deployments/latest.json");
+        console.log("- ./deployments/latest.json");
         console.log("- %s", deploymentPath);
     }
     
@@ -112,7 +120,7 @@ contract DeployContracts is Script {
         console.log("Deployer address:", deployer);
         console.log("Pool Manager address:", poolManager);
         
-        // Create JSON object to store deployment info
+        // Create JSON object to store deployment info - start with an empty object
         string memory deploymentJson = "{}";
         
         vm.startBroadcast(deployerPrivateKey);
@@ -129,13 +137,15 @@ contract DeployContracts is Script {
             protocol = new Protocol();
             console.log("Protocol deployed at:", address(protocol));
             
-            // Add to deployment JSON - fix writeString usage
-            deploymentJson = vm.serializeAddress(deploymentJson, "Protocol.address", address(protocol));
-            deploymentJson = vm.serializeString(deploymentJson, "Protocol.contract", "src/Protocol.sol:Protocol");
+            // Format Protocol contract info correctly as a nested object
+            string memory protocolObj = "{";
+            protocolObj = string(abi.encodePacked(protocolObj, "\"address\":\"", vm.toString(address(protocol)), "\","));
+            protocolObj = string(abi.encodePacked(protocolObj, "\"contract\":\"src/Protocol.sol:Protocol\","));
+            protocolObj = string(abi.encodePacked(protocolObj, "\"args\":[]"));
+            protocolObj = string(abi.encodePacked(protocolObj, "}"));
             
-            // Use serializeString instead of writeString
-            string memory emptyArgs = "[]";
-            deploymentJson = vm.serializeString(deploymentJson, "Protocol.args", emptyArgs);
+            // Build JSON manually instead of using vm.writeJson
+            deploymentJson = string(abi.encodePacked("{\"Protocol\":", protocolObj));
         }
         
         // Deploy StandardYieldToken (SY)
@@ -148,19 +158,19 @@ contract DeployContracts is Script {
             syToken = new StandardYieldToken(address(protocol));
             console.log("SY Token deployed at:", address(syToken));
             
-            // Add to deployment JSON
-            deploymentJson = vm.serializeAddress(deploymentJson, "StandardYieldToken.address", address(syToken));
-            deploymentJson = vm.serializeString(
-                deploymentJson, 
-                "StandardYieldToken.contract", 
-                "src/tokens/StandardYieldToken.sol:StandardYieldToken"
-            );
+            // Format StandardYieldToken contract info correctly as a nested object
+            string memory syTokenObj = "{";
+            syTokenObj = string(abi.encodePacked(syTokenObj, "\"address\":\"", vm.toString(address(syToken)), "\","));
+            syTokenObj = string(abi.encodePacked(syTokenObj, "\"contract\":\"src/tokens/StandardYieldToken.sol:StandardYieldToken\","));
+            syTokenObj = string(abi.encodePacked(syTokenObj, "\"args\":[\"", vm.toString(address(protocol)), "\"]"));
+            syTokenObj = string(abi.encodePacked(syTokenObj, "}"));
             
-            // Fix array serialization
-            string memory syArgs = "[";
-            syArgs = string(abi.encodePacked(syArgs, "\"", vm.toString(address(protocol)), "\""));
-            syArgs = string(abi.encodePacked(syArgs, "]"));
-            deploymentJson = vm.serializeString(deploymentJson, "StandardYieldToken.args", syArgs);
+            // Add to JSON
+            if (bytes(deploymentJson).length > 2) { // If not just "{}"
+                deploymentJson = string(abi.encodePacked(deploymentJson, ",\"StandardYieldToken\":", syTokenObj));
+            } else {
+                deploymentJson = string(abi.encodePacked("{\"StandardYieldToken\":", syTokenObj));
+            }
         }
         
         // Deploy PrincipalToken (PT)
@@ -173,19 +183,19 @@ contract DeployContracts is Script {
             ptToken = new PrincipalToken(address(protocol));
             console.log("PT Token deployed at:", address(ptToken));
             
-            // Add to deployment JSON
-            deploymentJson = vm.serializeAddress(deploymentJson, "PrincipalToken.address", address(ptToken));
-            deploymentJson = vm.serializeString(
-                deploymentJson, 
-                "PrincipalToken.contract", 
-                "src/tokens/PrincipalToken.sol:PrincipalToken"
-            );
+            // Format PrincipalToken contract info correctly as a nested object
+            string memory ptTokenObj = "{";
+            ptTokenObj = string(abi.encodePacked(ptTokenObj, "\"address\":\"", vm.toString(address(ptToken)), "\","));
+            ptTokenObj = string(abi.encodePacked(ptTokenObj, "\"contract\":\"src/tokens/PrincipalToken.sol:PrincipalToken\","));
+            ptTokenObj = string(abi.encodePacked(ptTokenObj, "\"args\":[\"", vm.toString(address(protocol)), "\"]"));
+            ptTokenObj = string(abi.encodePacked(ptTokenObj, "}"));
             
-            // Fix array serialization
-            string memory ptArgs = "[";
-            ptArgs = string(abi.encodePacked(ptArgs, "\"", vm.toString(address(protocol)), "\""));
-            ptArgs = string(abi.encodePacked(ptArgs, "]"));
-            deploymentJson = vm.serializeString(deploymentJson, "PrincipalToken.args", ptArgs);
+            // Add to JSON
+            if (bytes(deploymentJson).length > 2) { // If not just "{}"
+                deploymentJson = string(abi.encodePacked(deploymentJson, ",\"PrincipalToken\":", ptTokenObj));
+            } else {
+                deploymentJson = string(abi.encodePacked("{\"PrincipalToken\":", ptTokenObj));
+            }
         }
         
         // Deploy YieldSwapHook if not already deployed
@@ -248,32 +258,42 @@ contract DeployContracts is Script {
             hook = YieldSwapHook(deployedHook);
             console.log("YieldSwapHook deployed at:", address(hook));
             
-            // Add to deployment JSON
-            deploymentJson = vm.serializeAddress(deploymentJson, "YieldSwapHook.address", address(hook));
-            deploymentJson = vm.serializeString(
-                deploymentJson, 
-                "YieldSwapHook.contract", 
-                "src/YieldSwapHook.sol:YieldSwapHook"
-            );
+            // Format YieldSwapHook contract info correctly as a nested object
+            string memory hookObj = "{";
+            hookObj = string(abi.encodePacked(hookObj, "\"address\":\"", vm.toString(address(hook)), "\","));
+            hookObj = string(abi.encodePacked(hookObj, "\"contract\":\"src/YieldSwapHook.sol:YieldSwapHook\","));
             
-            // Fix array serialization 
-            string memory hookArgs = "[";
-            hookArgs = string(abi.encodePacked(hookArgs, "\"", vm.toString(address(protocol)), "\","));
-            hookArgs = string(abi.encodePacked(hookArgs, "\"", vm.toString(poolManager), "\","));
-            hookArgs = string(abi.encodePacked(hookArgs, vm.toString(epochStart), ","));
-            hookArgs = string(abi.encodePacked(hookArgs, vm.toString(epochDuration)));
-            hookArgs = string(abi.encodePacked(hookArgs, "]"));
-            deploymentJson = vm.serializeString(deploymentJson, "YieldSwapHook.args", hookArgs);
+            // Build args array
+            hookObj = string(abi.encodePacked(hookObj, "\"args\":["));
+            hookObj = string(abi.encodePacked(hookObj, "\"", vm.toString(address(protocol)), "\","));
+            hookObj = string(abi.encodePacked(hookObj, "\"", vm.toString(poolManager), "\","));
+            hookObj = string(abi.encodePacked(hookObj, vm.toString(epochStart), ","));
+            hookObj = string(abi.encodePacked(hookObj, vm.toString(epochDuration)));
+            hookObj = string(abi.encodePacked(hookObj, "]"));
             
-            // Add the hook parameters for reference
-            deploymentJson = vm.serializeUint(deploymentJson, "YieldSwapHook.epochStart", epochStart);
-            deploymentJson = vm.serializeUint(deploymentJson, "YieldSwapHook.epochDuration", epochDuration);
-            deploymentJson = vm.serializeUint(deploymentJson, "YieldSwapHook.SCALAR_ROOT", hook.SCALAR_ROOT());
-            deploymentJson = vm.serializeInt(deploymentJson, "YieldSwapHook.ANCHOR_ROOT", hook.ANCHOR_ROOT());
-            deploymentJson = vm.serializeInt(deploymentJson, "YieldSwapHook.ANCHOR_BASE", hook.ANCHOR_BASE());
-            deploymentJson = vm.serializeUint(deploymentJson, "YieldSwapHook.MINIMUM_LIQUIDITY", hook.MINIMUM_LIQUIDITY());
-            deploymentJson = vm.serializeBytes32(deploymentJson, "YieldSwapHook.salt", salt);
+            // Add extra metadata for reference
+            hookObj = string(abi.encodePacked(hookObj, ",\"metadata\":{"));
+            hookObj = string(abi.encodePacked(hookObj, "\"salt\":\"", vm.toString(salt), "\","));
+            hookObj = string(abi.encodePacked(hookObj, "\"epochStart\":", vm.toString(epochStart), ","));
+            hookObj = string(abi.encodePacked(hookObj, "\"epochDuration\":", vm.toString(epochDuration), ","));
+            hookObj = string(abi.encodePacked(hookObj, "\"SCALAR_ROOT\":", vm.toString(hook.SCALAR_ROOT()), ","));
+            hookObj = string(abi.encodePacked(hookObj, "\"ANCHOR_ROOT\":\"", vm.toString(hook.ANCHOR_ROOT()), "\","));
+            hookObj = string(abi.encodePacked(hookObj, "\"ANCHOR_BASE\":\"", vm.toString(hook.ANCHOR_BASE()), "\","));
+            hookObj = string(abi.encodePacked(hookObj, "\"MINIMUM_LIQUIDITY\":", vm.toString(hook.MINIMUM_LIQUIDITY())));
+            hookObj = string(abi.encodePacked(hookObj, "}"));
+            
+            hookObj = string(abi.encodePacked(hookObj, "}"));
+            
+            // Add to JSON
+            if (bytes(deploymentJson).length > 2) { // If not just "{}"
+                deploymentJson = string(abi.encodePacked(deploymentJson, ",\"YieldSwapHook\":", hookObj));
+            } else {
+                deploymentJson = string(abi.encodePacked("{\"YieldSwapHook\":", hookObj));
+            }
         }
+        
+        // Close the JSON object
+        deploymentJson = string(abi.encodePacked(deploymentJson, "}"));
         
         // Output deployment summary
         console.log("\nDeployment Summary:");

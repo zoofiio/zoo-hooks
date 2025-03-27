@@ -1,6 +1,6 @@
 # Deployment Scripts
 
-These scripts help deploy and initialize the ZooFi yield hooks contracts.
+This directory contains scripts for deploying and managing YieldSwapHook contracts.
 
 ## Prerequisites
 
@@ -25,111 +25,50 @@ BASESCAN_API_KEY=your_basescan_api_key
 mkdir -p deployments
 ```
 
-## Deployment Steps
+## Setup
 
-### 1. Deploy Contracts
-
-This will deploy Protocol, StandardYieldToken, PrincipalToken, and YieldSwapHook:
+Before deploying, run the initialization script to ensure the deployments directory exists:
 
 ```bash
-source .env
+forge script script/InitDeployments.s.sol --rpc-url sepolia -vvvv
+```
+
+## Deployment
+
+To deploy contracts:
+
+```bash
 forge script script/DeployContracts.s.sol --rpc-url sepolia --broadcast --verify
 ```
 
-The script will automatically load the PRIVATE_KEY and other variables from your .env file. It will save the deployment information to the `./deployments/` directory.
+## Verify Contracts
 
-### 2. Add Initial Liquidity
-
-This script mints SY and PT tokens to the deployer and adds initial liquidity to the YieldSwapHook:
+After deployment, get verification commands:
 
 ```bash
-source .env
-forge script script/AddInitialLiquidity.s.sol --rpc-url $RPC_URL_SEPOLIA --broadcast
+forge script script/Verify.s.sol --rpc-url sepolia -vvv
 ```
 
-The script will load the deployment addresses from `./deployments/latest.json`.
+## Contract Addresses
 
-## Verifying Contracts
+Contract addresses are stored in JSON files in the `deployments` directory:
+- Network-specific files (e.g., `deployments/sepolia.json`)
+- Latest deployment: `deployments/latest.json`
 
-After deployment, you need to verify the contracts on the blockchain explorer. Foundry provides two methods for verification:
-
-### Method 1: Automatic Verification During Deployment
-
-Add the `--verify` flag to the deployment command:
-
-```bash
-source .env
-forge script script/DeployContracts.s.sol --rpc-url $RPC_URL_SEPOLIA --broadcast --verify
-```
-
-This requires you to have set the appropriate API key in your `.env` file:
-- `ETHERSCAN_API_KEY` for Ethereum networks (mainnet, sepolia, etc.)
-- `BASESCAN_API_KEY` for Base networks
-
-### Method 2: Manual Verification
-
-You can also verify contracts manually after deployment:
-
-```bash
-# Verify Protocol contract
-forge verify-contract \
-  --chain-id <CHAIN_ID> \
-  --watch \
-  --constructor-args $(cast abi-encode "constructor()") \
-  <PROTOCOL_ADDRESS> \
-  src/Protocol.sol:Protocol
-  
-# Verify SY Token contract
-forge verify-contract \
-  --chain-id <CHAIN_ID> \
-  --watch \
-  --constructor-args $(cast abi-encode "constructor(address)" <PROTOCOL_ADDRESS>) \
-  <SY_TOKEN_ADDRESS> \
-  src/tokens/StandardYieldToken.sol:StandardYieldToken
-
-# Verify PT Token contract
-forge verify-contract \
-  --chain-id <CHAIN_ID> \
-  --watch \
-  --constructor-args $(cast abi-encode "constructor(address)" <PROTOCOL_ADDRESS>) \
-  <PT_TOKEN_ADDRESS> \
-  src/tokens/PrincipalToken.sol:PrincipalToken
-
-# Verify YieldSwapHook contract
-forge verify-contract \
-  --chain-id <CHAIN_ID> \
-  --watch \
-  --constructor-args $(cast abi-encode "constructor(address,address,uint256,uint256)" <PROTOCOL_ADDRESS> <POOL_MANAGER_ADDRESS> <EPOCH_START> <EPOCH_DURATION>) \
-  <HOOK_ADDRESS> \
-  src/YieldSwapHook.sol:YieldSwapHook
-```
-
-Replace `<CHAIN_ID>`, `<PROTOCOL_ADDRESS>`, and other placeholders with your actual values from the deployment output. You can find chain IDs here:
-- Ethereum Mainnet: 1
-- Sepolia: 11155111
-- Base: 8453
-- Base Goerli: 84531
-
-### Verification Helper Script
-
-You can use the following helper command to generate the verification commands with the correct parameters from your deployment:
-
-```bash
-# Read deployment details and output verification commands
-forge script script/Verify.s.sol
-```
-
-## Configuring Network
-
-To deploy to a different network, update the `NETWORK` variable in your `.env` file:
-
-```
-NETWORK=base  # or sepolia, mainnet, etc.
-```
-
-Then run the deployment commands using the corresponding RPC URL:
-
-```bash
-source .env
-forge script script/DeployContracts.s.sol --rpc-url $RPC_URL_BASE --broadcast --verify
+The JSON format is:
+```json
+{
+  "Protocol": {
+    "address": "0x3f3e44fc9842F8bF64D8277D2559130191924B96",
+    "contract": "src/Protocol.sol:Protocol",
+    "args": []
+  },
+  "StandardYieldToken": {
+    "address": "0x8ce947b41F404e9b52191b35c12634FC1DA630C3",
+    "contract": "src/tokens/StandardYieldToken.sol:StandardYieldToken", 
+    "args": [
+      "0x3f3e44fc9842F8bF64D8277D2559130191924B96"
+    ]
+  }
+}
 ```
