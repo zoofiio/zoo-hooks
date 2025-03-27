@@ -82,6 +82,76 @@ contract DeployContracts is Script {
         }
     }
     
+    // Format JSON with indentation and line breaks
+    function formatJson(string memory jsonStr) internal pure returns (string memory) {
+        bytes memory jsonBytes = bytes(jsonStr);
+        uint256 indent = 0;
+        bool inQuotes = false;
+        
+        string memory result = "";
+        string memory indentStr = "";
+        
+        for (uint256 i = 0; i < jsonBytes.length; i++) {
+            bytes1 char = jsonBytes[i];
+            
+            // Track whether we're inside quotes
+            if (char == '"' && (i == 0 || jsonBytes[i-1] != '\\')) {
+                inQuotes = !inQuotes;
+            }
+            
+            // Only apply formatting if outside quotes
+            if (!inQuotes) {
+                // Handle opening braces
+                if (char == '{' || char == '[') {
+                    // Add opening brace followed by new line
+                    result = string(abi.encodePacked(result, string(abi.encodePacked(char)), "\n"));
+                    indent++;
+                    indentStr = getIndent(indent);
+                    result = string(abi.encodePacked(result, indentStr));
+                    continue;
+                }
+                
+                // Handle closing braces
+                if (char == '}' || char == ']') {
+                    // Add new line and indentation before closing brace
+                    result = string(abi.encodePacked(result, "\n"));
+                    indent--;
+                    indentStr = getIndent(indent);
+                    result = string(abi.encodePacked(result, indentStr, string(abi.encodePacked(char))));
+                    continue;
+                }
+                
+                // Handle commas
+                if (char == ',') {
+                    // Add comma followed by new line and indentation
+                    result = string(abi.encodePacked(result, string(abi.encodePacked(char)), "\n", indentStr));
+                    continue;
+                }
+                
+                // Handle colons
+                if (char == ':') {
+                    // Add colon followed by a space
+                    result = string(abi.encodePacked(result, ": "));
+                    continue;
+                }
+            }
+            
+            // Add all other characters
+            result = string(abi.encodePacked(result, string(abi.encodePacked(char))));
+        }
+        
+        return result;
+    }
+    
+    // Generate indentation string
+    function getIndent(uint256 level) internal pure returns (string memory) {
+        string memory indent = "";
+        for (uint256 i = 0; i < level; i++) {
+            indent = string(abi.encodePacked(indent, "  ")); // 2 spaces per level
+        }
+        return indent;
+    }
+    
     // Save deployment information to network-specific file
     function saveDeployment(string memory network, string memory contractsJson) internal {
         string memory deploymentPath = getDeploymentPath(network);
@@ -93,12 +163,14 @@ contract DeployContracts is Script {
         mkdirCmd[2] = "./deployments";
         vm.ffi(mkdirCmd);
         
+        // Format the JSON before saving
+        string memory formattedJson = formatJson(contractsJson);
+        
         // Directly write to the file, overwriting any existing content
-        // This is simpler and more reliable than trying to merge JSON objects
-        vm.writeFile(deploymentPath, contractsJson);
+        vm.writeFile(deploymentPath, formattedJson);
         
         // Also save to latest.json for convenience
-        vm.writeFile("./deployments/latest.json", contractsJson);
+        vm.writeFile("./deployments/latest.json", formattedJson);
         
         console.log("\nDeployment info saved to:");
         console.log("- ./deployments/latest.json");

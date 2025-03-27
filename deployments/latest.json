@@ -1,1 +1,42 @@
-{"Protocol":{"address":"0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445","contract":"src/Protocol.sol:Protocol","args":[]},"StandardYieldToken":{"address":"0xa2ad9Ce2E8F9B0107df65Fa0211D237CBaB0497a","contract":"src/tokens/StandardYieldToken.sol:StandardYieldToken","args":["0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445"]},"PrincipalToken":{"address":"0x6e08b209562B01FD5131E7dfDa8ffD8B221e74cE","contract":"src/tokens/PrincipalToken.sol:PrincipalToken","args":["0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445"]},"YieldSwapHook":{"address":"0x1df539735eC30b50Ac17Ca55A2DcaC01Fd656a88","contract":"src/YieldSwapHook.sol:YieldSwapHook","args":["0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445","0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",1743056892,2592000],"metadata":{"salt":"0x0000000000000000000000000000000000000000000000000000000000004085","epochStart":1743056892,"epochDuration":2592000,"SCALAR_ROOT":200,"ANCHOR_ROOT":"1200000000000000000","ANCHOR_BASE":"1000000000000000000","MINIMUM_LIQUIDITY":1000}}}
+{
+  "Protocol": {
+    "address": "0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445",
+    "contract": "src/Protocol.sol:Protocol",
+    "args": [
+      
+    ]
+  },
+  "StandardYieldToken": {
+    "address": "0xa2ad9Ce2E8F9B0107df65Fa0211D237CBaB0497a",
+    "contract": "src/tokens/StandardYieldToken.sol:StandardYieldToken",
+    "args": [
+      "0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445"
+    ]
+  },
+  "PrincipalToken": {
+    "address": "0x6e08b209562B01FD5131E7dfDa8ffD8B221e74cE",
+    "contract": "src/tokens/PrincipalToken.sol:PrincipalToken",
+    "args": [
+      "0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445"
+    ]
+  },
+  "YieldSwapHook": {
+    "address": "0x1df539735eC30b50Ac17Ca55A2DcaC01Fd656a88",
+    "contract": "src/YieldSwapHook.sol:YieldSwapHook",
+    "args": [
+      "0x958F5165ad0b45b5DeaE5F51E9F8A4a52E4c6445",
+      "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+      1743056892,
+      2592000
+    ],
+    "metadata": {
+      "salt": "0x0000000000000000000000000000000000000000000000000000000000004085",
+      "epochStart": 1743056892,
+      "epochDuration": 2592000,
+      "SCALAR_ROOT": 200,
+      "ANCHOR_ROOT": "1200000000000000000",
+      "ANCHOR_BASE": "1000000000000000000",
+      "MINIMUM_LIQUIDITY": 1000
+    }
+  }
+}

@@ -28,6 +28,8 @@ contract AddInitialLiquidity is Script {
     int24 public constant MIN_TICK = -887220;
     int24 public constant MAX_TICK = 887220;
     uint256 public constant MAX_DEADLINE = type(uint256).max;
+    uint24 public constant FEE = 3000; // 0.3% fee tier
+    int24 public constant TICK_SPACING = 60; // Standard tick spacing for 0.3% fee tier
     
     // Contract addresses loaded from deployment file
     address protocolAddress;
@@ -105,14 +107,62 @@ contract AddInitialLiquidity is Script {
         ptToken.approve(hookAddress, type(uint256).max);
         console.log("\nApproved tokens for YieldSwapHook");
         
-        // 3. Add initial liquidity
-        // Create AddLiquidityParams
+        // 3. First create and initialize the pool - Order currencies properly
+        // Sort tokens by address so the smaller one is currency0
+        (address token0, address token1) = address(syToken) < address(ptToken) 
+            ? (address(syToken), address(ptToken)) 
+            : (address(ptToken), address(syToken));
+            
+        console.log("\nSorted token addresses:");
+        console.log("token0 (smaller address):", token0);
+        console.log("token1 (larger address):", token1);
+        
+        // Create pool key with properly ordered currencies
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(token0),
+            currency1: Currency.wrap(token1),
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(hookAddress)
+        });
+        
+        // Get pool manager address from the hook
+        IPoolManager poolManager = hook.poolManager();
+        
+        // Calculate the initial price - using 1:1 ratio
+        uint160 sqrtPriceX96 = 79228162514264337593543950336; // 1.0 as Q96.64
+        
+        console.log("\nInitializing pool with initial price:", uint256(sqrtPriceX96));
+        console.log("Pool Manager address:", address(poolManager));
+        
+        // Initialize the pool using the pool manager
+        try poolManager.initialize(poolKey, sqrtPriceX96) {
+            console.log("Pool initialized successfully");
+        } catch Error(string memory reason) {
+            console.log("Pool initialization failed:", reason);
+        } catch {
+            console.log("Pool initialization failed with unknown error");
+        }
+        
+        // 4. Now add initial liquidity with the same poolKey
+        // Check which token is which to determine amount0 and amount1
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        
+        if (token0 == address(syToken)) {
+            amount0Desired = SY_LIQUIDITY;
+            amount1Desired = PT_LIQUIDITY;
+        } else {
+            amount0Desired = PT_LIQUIDITY;
+            amount1Desired = SY_LIQUIDITY;
+        }
+        
         ZooCustomAccounting.AddLiquidityParams memory params = ZooCustomAccounting.AddLiquidityParams({
-            amount0Desired: SY_LIQUIDITY,
-            amount1Desired: PT_LIQUIDITY,
-            amount0Min: 0,  // No slippage protection for initial liquidity
-            amount1Min: 0,  // No slippage protection for initial liquidity
-            to: deployer,   // Send LP tokens to deployer
+            amount0Desired: amount0Desired,
+            amount1Desired: amount1Desired,
+            amount0Min: 0,
+            amount1Min: 0,
+            to: deployer,
             deadline: MAX_DEADLINE,
             tickLower: MIN_TICK,
             tickUpper: MAX_TICK,
@@ -122,24 +172,20 @@ contract AddInitialLiquidity is Script {
         // Add liquidity
         hook.addLiquidity(params);
         
-        // 4. Log results
+        // 5. Log results
         console.log("\nLiquidity added successfully:");
-        console.log("SY added:", SY_LIQUIDITY / 1 ether, "ether");
-        console.log("PT added:", PT_LIQUIDITY / 1 ether, "ether");
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
+        console.log("Amount0:", amount0Desired / 1 ether, "ether");
+        console.log("Amount1:", amount1Desired / 1 ether, "ether");
         console.log("LP tokens received:", hook.balanceOf(deployer) / 1 ether, "ether");
         
-        // 5. Verify reserves - Fix poolKey() usage issue
-        (uint256 reserveSY, uint256 reservePT) = hook.getReserves(PoolKey({
-            currency0: Currency.wrap(address(syToken)),
-            currency1: Currency.wrap(address(ptToken)), 
-            fee: 0, // Use appropriate fee value
-            tickSpacing: 60, // Use appropriate tick spacing
-            hooks: IHooks(address(hook)) // Cast hook address to IHooks
-        }));
+        // 6. Verify reserves
+        (uint256 reserve0, uint256 reserve1) = hook.getReserves(poolKey);
         
         console.log("\nVerifying pool reserves:");
-        console.log("SY reserves:", reserveSY / 1 ether, "ether");
-        console.log("PT reserves:", reservePT / 1 ether, "ether");
+        console.log("Reserve0:", reserve0 / 1 ether, "ether");
+        console.log("Reserve1:", reserve1 / 1 ether, "ether");
         
         vm.stopBroadcast();
     }
