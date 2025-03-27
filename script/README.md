@@ -81,6 +81,9 @@ After deployment, get contract verification commands:
 source .env
 export NETWORK=arbitrum
 forge script script/Verify.s.sol --rpc-url arbitrum
+
+# e.g.
+# forge verify-contract  --chain 42161 0x09E73495F519e3c58172bE06D54E92905210C43E src/tokens/StandardYieldToken.sol:StandardYieldToken --constructor-args $(cast abi-encode "constructor(address)" 0xD4EA290223Ae45EBe87E36f2500270b1CA404Ef7) --etherscan-api-key $ETHERSCAN_API_KEY_ARBITRUM
 ```
 
 ## Format Deployment JSON Files
@@ -89,6 +92,39 @@ If you need to format deployment JSON files, run:
 
 ```bash
 forge script script/FormatJson.s.sol
+```
+
+## Troubleshooting
+
+### Uniswap Frontend "No Routes Available" Issue
+
+When using the Uniswap frontend to swap SY -> PT tokens, you may encounter a "No routes available" error despite successfully executing swaps via the SwapTokens.s.sol script. This can occur for several reasons:
+
+1. **Custom Hook Recognition**: YieldSwapHook is a custom hook that implements specialized swap logic which the standard Uniswap router may not recognize. The script works because it directly interacts with the hook and pool manager.
+
+2. **Indexing Delay**: The Uniswap frontend relies on subgraphs and indexers to discover pools and routes. New pools may not be immediately indexed and therefore not visible to the frontend.
+
+3. **Limited V4 Frontend Support**: Uniswap's interface may have limited support for custom V4 hooks and pools that utilize non-standard swap logic.
+
+4. **Pool Visibility**: Some hooks may implement permissions or custom logic that makes them incompatible with standard routing algorithms.
+
+#### Workarounds
+
+To interact with your pools despite this issue:
+
+1. **Direct Script Interaction**: Continue using the provided Forge scripts for reliable swaps.
+
+2. **Custom Frontend**: Build a custom frontend that understands your specific hook logic.
+
+3. **Manual Pool Contract Interaction**: Use block explorers like Arbiscan to interact directly with your pool contracts.
+
+4. **Wait for Indexing**: Sometimes waiting 24-48 hours allows indexers to discover and register new pools.
+
+5. **Verify Pool Parameters**: Ensure your pool parameters like fee tier and tick spacing match standard configurations that Uniswap's routers expect.
+
+```bash
+# Example of manual swap using script (reliable method)
+forge script script/SwapTokens.s.sol --rpc-url arbitrum --broadcast
 ```
 
 ## Contract Addresses
