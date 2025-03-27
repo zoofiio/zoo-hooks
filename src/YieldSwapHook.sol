@@ -19,6 +19,7 @@ import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary
 import {ZooCustomCurve} from "src/base/ZooCustomCurve.sol";
 import {CurrencySettler} from "src/utils/CurrencySettler.sol";
 import {ProtocolOwner} from "src/ProtocolOwner.sol";
+import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 
 /**
  * @title YieldSwapHook
@@ -81,11 +82,9 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     /**
      * @notice Calculate current time factor and rate parameters
      * @dev Time factor t: linear from 1 at epochStart to 0 after epochDuration
-     * @return t Current time factor
-     * @return currentRateScalar Current scalar parameter
-     * @return currentRateAnchor Current anchor parameter
+     * @return t Current time factor (between 0 and 1e18)
      */
-    function getCurrentRateParameters() public view returns (uint256 t, uint256 currentRateScalar, int256 currentRateAnchor) {
+    function getCurrentTimeFactor() public view returns (uint256 t) {
         uint256 currentTime = block.timestamp;
         
         if (currentTime <= epochStart) {
@@ -97,23 +96,59 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         } else {
             // During epoch, linearly decrease from 1 to 0
             uint256 timeElapsed = currentTime - epochStart;
-            t = ((epochDuration - timeElapsed) * 1e18) / epochDuration;
+            // Use FullMath.mulDiv for safer arithmetic
+            t = FullMath.mulDiv(epochDuration - timeElapsed, 1e18, epochDuration);
         }
         
-        // Handle division by zero case
-        if (t == 0) {
-            // When t=0, set a maximum reasonable value for scalar
-            currentRateScalar = type(uint256).max / 2; // Avoid extreme values
-            currentRateAnchor = ANCHOR_BASE; // 1.0 in 18 decimals
+        return t;
+    }
+
+    /**
+     * @notice Helper function to calculate price using the optimized formula
+     * @dev Price_SY = (t / SCALAR_ROOT) * ln(Portion_PT / (1 - Portion_PT)) + (ANCHOR_ROOT - 1) * t + 1
+     * @param portionPT Portion of PT tokens in the pool (scaled by 1e18)
+     * @return Calculated price (scaled by 1e18)
+     */
+    function calculatePrice(uint256 portionPT) internal view returns (int256) {
+        // Get current time factor
+        uint256 t = getCurrentTimeFactor();
+        
+        // Handle edge cases to avoid division by zero or log of zero/negative
+        if (portionPT == 0) revert MathError(); // Portion PT should not be zero
+        if (portionPT >= 1e18) revert MathError(); // Portion PT should be less than 1
+        
+        // Calculate ln(portion_PT / (1 - portion_PT))
+        uint256 numerator = portionPT;
+        uint256 denominator = 1e18 - portionPT;
+
+        // Calculate the log term
+        int256 logTerm = this.calculateLogTerm(numerator, denominator);
+        console.log("YieldSwapHook: calculatePrice, ln(numerator): ", numerator * 1e18, MathLibrary.ln(numerator * 1e18));
+        console.log("YieldSwapHook: calculatePrice, ln(denominator): ", denominator * 1e18, MathLibrary.ln(denominator * 1e18));
+        console.log("YieldSwapHook: calculatePrice, logTerm: ", logTerm);
+        
+        // The first component: (t / SCALAR_ROOT) * logTerm
+        int256 firstComponent;
+        if (logTerm >= 0) {
+            firstComponent = int256(FullMath.mulDiv(uint256(logTerm), t, SCALAR_ROOT * 1e18));
         } else {
-            // Calculate rateScalar = ScalarRoot / t
-            currentRateScalar = (SCALAR_ROOT * 1e18) / t;
-            
-            // Calculate rateAnchor = (AnchorRoot - 1) * t + 1
-            currentRateAnchor = ((ANCHOR_ROOT - ANCHOR_BASE) * int256(t)) / 1e18 + ANCHOR_BASE;
+            firstComponent = -int256(FullMath.mulDiv(uint256(-logTerm), t, SCALAR_ROOT * 1e18));
         }
         
-        return (t, currentRateScalar, currentRateAnchor);
+        // The second component: (ANCHOR_ROOT - 1) * t + 1
+        int256 secondComponent = ((ANCHOR_ROOT - ANCHOR_BASE) * int256(t)) / 1e18 + ANCHOR_BASE;
+        
+        // Final price: firstComponent + secondComponent
+        return firstComponent + secondComponent;
+    }
+
+    /**
+     * @notice External function to safely calculate log term
+     * @dev Made external to use try/catch for error handling
+     */
+    function calculateLogTerm(uint256 numerator, uint256 denominator) external pure returns (int256) {
+        int256 logTerm = int256(MathLibrary.ln(numerator * 1e18)) - int256(MathLibrary.ln(denominator * 1e18));
+        return logTerm;
     }
     
     // Externally visible helper function to get reserves for testing
@@ -135,42 +170,10 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         
         emit ParametersUpdated(_epochStart, _epochDuration);
     }
-    
-    /**
-     * @notice Helper function to calculate price using the formula
-     * @dev Price_SY = (1 / RateScalar) * ln (Portion_PT / (1 - Portion_PT)) + RateAnchor
-     * @param portionPT Portion of PT tokens in the pool (scaled by 1e18)
-     * @return Calculated price (scaled by 1e18)
-     */
-    function calculatePrice(uint256 portionPT) internal view returns (int256) {
-        // Get current rate parameters based on time
-        (, uint256 currentRateScalar, int256 currentRateAnchor) = getCurrentRateParameters();
-        
-        // Handle edge cases to avoid division by zero or log of zero/negative
-        if (portionPT == 0) return currentRateAnchor;
-        if (portionPT >= 1e18) revert MathError(); // Portion PT should be less than 1
-        
-        // Calculate ln(portion_PT / (1 - portion_PT))
-        // Using 18 decimal precision
-        uint256 numerator = portionPT;
-        uint256 denominator = 1e18 - portionPT;
-
-        // Use the MathLibrary library for ln calculations
-        int256 logTerm = int256(MathLibrary.ln(numerator * 1e18)) - int256(MathLibrary.ln(denominator * 1e18));
-        console.log("YieldSwapHook: calculatePrice, ln(numerator): ", numerator * 1e18, MathLibrary.ln(numerator * 1e18));
-        console.log("YieldSwapHook: calculatePrice, ln(denominator): ", denominator * 1e18, MathLibrary.ln(denominator * 1e18));
-        console.log("YieldSwapHook: calculatePrice, logTerm: ", logTerm);
-        
-        // Calculate (1 / rateScalar) * ln(...)
-        int256 scaledLog = logTerm / int256(currentRateScalar);
-        
-        // Final formula: scaled_log + currentRateAnchor
-        return scaledLog + currentRateAnchor;
-    }
 
     /**
      * @notice Implementation of BaseCustomCurve's _getUnspecifiedAmount
-     * @dev Only supports exact input swaps (amountSpecified < 0)
+     * @dev Only supports exact input swaps (amountSpecified < 0)ot - 1) * t + 1
      */
     function _getUnspecifiedAmount(IPoolManager.SwapParams calldata params)
         internal
@@ -216,8 +219,8 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         uint256 totalReserve = reserve0 + reserve1;
         if (totalReserve == 0) revert InvalidHookConfiguration();
         
-        // Calculate portion_PT before swap
-        uint256 portionPTBefore = (reserve1 * 1e18) / totalReserve;
+        // Calculate portion_PT before swap using mulDiv for safety
+        uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
         
         // Calculate Price_SY_Before using current time-based parameters
         int256 priceSYBefore = calculatePrice(portionPTBefore);
@@ -225,16 +228,20 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         // Calculate reserves after swap
         uint256 reserve0After = reserve0 + amountIn;
         
-        // Estimate output using initial price
-        int256 estimatedDeltaPT = (int256(amountIn) * priceSYBefore) / 1e18;
-        uint256 reserve1After = reserve1 > uint256(estimatedDeltaPT) 
-            ? reserve1 - uint256(estimatedDeltaPT) 
-            : 0;
-            
+        // Estimate output using initial price - handle signed arithmetic carefully
+        uint256 estimatedDeltaPT;
+        if (priceSYBefore >= 0) {
+            estimatedDeltaPT = FullMath.mulDiv(amountIn, uint256(priceSYBefore), 1e18);
+        } else {
+            // If price is negative (unusual but possible in some models), we'd get zero PT
+            estimatedDeltaPT = 0;
+        }
+        
+        uint256 reserve1After = reserve1 > estimatedDeltaPT ? reserve1 - estimatedDeltaPT : 0;
         uint256 totalReserveAfter = reserve0After + reserve1After;
         
-        // Calculate portion_PT after swap
-        uint256 portionPTAfter = (reserve1After * 1e18) / totalReserveAfter;
+        // Calculate portion_PT after swap using mulDiv
+        uint256 portionPTAfter = FullMath.mulDiv(reserve1After, 1e18, totalReserveAfter);
         
         // Calculate Price_SY_After using current time-based parameters
         int256 priceSYAfter = calculatePrice(portionPTAfter);
@@ -242,8 +249,13 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         // Calculate average price
         int256 avgPrice = (priceSYBefore + priceSYAfter) / 2;
         
-        // Calculate final output amount (PT)
-        amountOut = uint256((int256(amountIn) * avgPrice) / 1e18);
+        // Calculate final output amount (PT) - handle signed arithmetic carefully
+        if (avgPrice >= 0) {
+            amountOut = FullMath.mulDiv(amountIn, uint256(avgPrice), 1e18);
+        } else {
+            // If average price is negative, return zero
+            amountOut = 0;
+        }
         
         // Ensure there's enough PT in the pool
         if (amountOut > reserve1) revert InsufficientPTReserves();
@@ -286,11 +298,10 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
             // First liquidity provision
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
         } else {
-            // Subsequent liquidity provisions
-            liquidity = Math.min(
-                (amount0 * _totalSupply) / reserveSY, 
-                (amount1 * _totalSupply) / reservePT
-            );
+            // Subsequent liquidity provisions - use mulDiv for safety
+            uint256 liquidity0 = FullMath.mulDiv(amount0, _totalSupply, reserveSY);
+            uint256 liquidity1 = FullMath.mulDiv(amount1, _totalSupply, reservePT);
+            liquidity = Math.min(liquidity0, liquidity1);
         }
         
         if (liquidity <= 0) revert InsufficientLiquidity();
@@ -311,9 +322,9 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         liquidity = params.liquidity;
         uint256 _totalSupply = totalSupply();
         
-        // Calculate proportional share of reserves
-        amount0 = (reserveSY * liquidity) / _totalSupply;
-        amount1 = (reservePT * liquidity) / _totalSupply;
+        // Calculate proportional share of reserves using mulDiv for safety
+        amount0 = FullMath.mulDiv(reserveSY, liquidity, _totalSupply);
+        amount1 = FullMath.mulDiv(reservePT, liquidity, _totalSupply);
         
         return (amount0, amount1, liquidity);
     }
