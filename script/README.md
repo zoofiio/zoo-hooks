@@ -49,7 +49,7 @@ export NETWORK=arbitrum
 forge script script/DeployContracts.s.sol --rpc-url arbitrum --broadcast --verify
 ```
 
-## Add Initial Liquidity
+## Add Initial Liquidity and Swap
 
 After deploying the contracts, you can use the following command to add initial liquidity:
 
@@ -60,6 +60,9 @@ source .env
 # Add initial liquidity on Arbitrum
 export NETWORK=arbitrum
 forge script script/AddInitialLiquidity.s.sol --rpc-url arbitrum --broadcast
+
+# Swap SY -> PT
+forge script script/SwapTokens.s.sol --rpc-url arbitrum --broadcast
 ```
 
 This script will:

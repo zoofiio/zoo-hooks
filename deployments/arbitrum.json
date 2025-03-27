@@ -1,37 +1,37 @@
 {
   "Protocol": {
-    "address": "0x0AFFAebbcE68552c657AD3abAf55cB8Fa0F1E5C3",
+    "address": "0xD4EA290223Ae45EBe87E36f2500270b1CA404Ef7",
     "contract": "src/Protocol.sol:Protocol",
     "args": [
       
     ]
   },
   "StandardYieldToken": {
-    "address": "0x5cD9e7907522016160A8ce6Ad58Dc8A80909E79F",
+    "address": "0x09E73495F519e3c58172bE06D54E92905210C43E",
     "contract": "src/tokens/StandardYieldToken.sol:StandardYieldToken",
     "args": [
-      "0x0AFFAebbcE68552c657AD3abAf55cB8Fa0F1E5C3"
+      "0xD4EA290223Ae45EBe87E36f2500270b1CA404Ef7"
     ]
   },
   "PrincipalToken": {
-    "address": "0x12f24B99fC6C233666A3aA0373181741fB9Fe74e",
+    "address": "0xd346a2328cD0C4ddF7B50812054AF269930C0e94",
     "contract": "src/tokens/PrincipalToken.sol:PrincipalToken",
     "args": [
-      "0x0AFFAebbcE68552c657AD3abAf55cB8Fa0F1E5C3"
+      "0xD4EA290223Ae45EBe87E36f2500270b1CA404Ef7"
     ]
   },
   "YieldSwapHook": {
-    "address": "0x1Ebb48db3C15D6618540cE9b97A2B93c109Caa88",
+    "address": "0xB33DAf4226FF2a594854D1A5F11C8c2e0E1eea88",
     "contract": "src/YieldSwapHook.sol:YieldSwapHook",
     "args": [
-      "0x0AFFAebbcE68552c657AD3abAf55cB8Fa0F1E5C3",
+      "0xD4EA290223Ae45EBe87E36f2500270b1CA404Ef7",
       "0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32",
-      1743062026,
+      1743078869,
       2592000
     ],
     "metadata": {
-      "salt": "0x000000000000000000000000000000000000000000000000000000000000a0d8",
-      "epochStart": 1743062026,
+      "salt": "0x000000000000000000000000000000000000000000000000000000000000236e",
+      "epochStart": 1743078869,
       "epochDuration": 2592000,
       "SCALAR_ROOT": 200,
       "ANCHOR_ROOT": "1200000000000000000",

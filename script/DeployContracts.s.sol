@@ -13,6 +13,7 @@ import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {Create2} from "openzeppelin/utils/Create2.sol";
 import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
+import {AddressGenerator} from "src/deployment/AddressGenerator.sol";
 
 contract DeployContracts is Script {
     using stdJson for string;
@@ -53,6 +54,7 @@ contract DeployContracts is Script {
     StandardYieldToken public syToken;
     PrincipalToken public ptToken;
     YieldSwapHook public hook;
+    AddressGenerator public addressGenerator;
     
     // Hook flags for YieldSwapHook
     address public hookAddress;
@@ -208,6 +210,13 @@ contract DeployContracts is Script {
         
         vm.startBroadcast(deployerPrivateKey);
         
+        // Deploy AddressGenerator first
+        addressGenerator = new AddressGenerator();
+        console.log("AddressGenerator deployed at:", address(addressGenerator));
+        
+        // Initialize JSON for deployment info
+        deploymentJson = "{}";
+        
         // Deploy Protocol if not already deployed
         bool deployed;
         address existingAddress;
@@ -231,17 +240,73 @@ contract DeployContracts is Script {
             deploymentJson = string(abi.encodePacked("{\"Protocol\":", protocolObj));
         }
         
-        // Deploy StandardYieldToken (SY)
-        (deployed, existingAddress) = isContractDeployed(network, "StandardYieldToken");
+        // Check if both tokens are already deployed
+        bool sYDeployed; 
+        bool pTDeployed;
+        address existingSYAddress;
+        address existingPTAddress;
+        (sYDeployed, existingSYAddress) = isContractDeployed(network, "StandardYieldToken");
+        (pTDeployed, existingPTAddress) = isContractDeployed(network, "PrincipalToken");
         
-        if (deployed) {
-            console.log("StandardYieldToken already deployed at:", existingAddress);
-            syToken = StandardYieldToken(existingAddress);
-        } else {
-            syToken = new StandardYieldToken(address(protocol));
-            console.log("SY Token deployed at:", address(syToken));
+        // If both are deployed, use existing addresses
+        if (sYDeployed && pTDeployed) {
+            syToken = StandardYieldToken(existingSYAddress);
+            ptToken = PrincipalToken(existingPTAddress);
+            console.log("StandardYieldToken already deployed at:", existingSYAddress);
+            console.log("PrincipalToken already deployed at:", existingPTAddress);
             
-            // Format StandardYieldToken contract info correctly as a nested object
+            // Check address ordering for consistency
+            if (address(syToken) > address(ptToken)) {
+                console.log("WARNING: Existing SY address is larger than PT address!");
+            } else {
+                console.log("Address check passed: SY < PT");
+            }
+        } 
+        // If neither is deployed yet, deploy with controlled addresses
+        else if (!sYDeployed && !pTDeployed) {
+            // Get bytecode with constructor arguments
+            bytes memory syBytecode = abi.encodePacked(
+                type(StandardYieldToken).creationCode,
+                abi.encode(address(protocol))
+            );
+            bytes memory ptBytecode = abi.encodePacked(
+                type(PrincipalToken).creationCode,
+                abi.encode(address(protocol))
+            );
+            
+            // Find salts that ensure SY address < PT address
+            (bytes32 sySalt, bytes32 ptSalt) = addressGenerator.findAddressOrderingSalts(
+                keccak256(syBytecode),
+                keccak256(ptBytecode)
+            );
+            
+            // Predict the addresses
+            address predictedSYAddr = addressGenerator.computeAddress(sySalt, keccak256(syBytecode));
+            address predictedPTAddr = addressGenerator.computeAddress(ptSalt, keccak256(ptBytecode));
+            
+            console.log("Found appropriate CREATE2 salts:");
+            console.log("SY salt:", uint256(sySalt));
+            console.log("PT salt:", uint256(ptSalt));
+            console.log("Predicted SY address:", predictedSYAddr);
+            console.log("Predicted PT address:", predictedPTAddr);
+            
+            // Deploy tokens with these salts
+            address syDeployed = addressGenerator.deploy(sySalt, syBytecode);
+            address ptDeployed = addressGenerator.deploy(ptSalt, ptBytecode);
+            
+            syToken = StandardYieldToken(syDeployed);
+            ptToken = PrincipalToken(ptDeployed);
+            
+            console.log("SY Token deployed at:", address(syToken));
+            console.log("PT Token deployed at:", address(ptToken));
+            
+            // Verify addresses match predictions and ordering
+            require(address(syToken) == predictedSYAddr, "SY deployment address mismatch");
+            require(address(ptToken) == predictedPTAddr, "PT deployment address mismatch");
+            require(address(syToken) < address(ptToken), "SY address must be smaller than PT address");
+            console.log("Address check passed: SY < PT");
+            
+            // Format StandardYieldToken object
             string memory syTokenObj = "{";
             syTokenObj = string(abi.encodePacked(syTokenObj, "\"address\":\"", vm.toString(address(syToken)), "\","));
             syTokenObj = string(abi.encodePacked(syTokenObj, "\"contract\":\"src/tokens/StandardYieldToken.sol:StandardYieldToken\","));
@@ -254,19 +319,8 @@ contract DeployContracts is Script {
             } else {
                 deploymentJson = string(abi.encodePacked("{\"StandardYieldToken\":", syTokenObj));
             }
-        }
-        
-        // Deploy PrincipalToken (PT)
-        (deployed, existingAddress) = isContractDeployed(network, "PrincipalToken");
-        
-        if (deployed) {
-            console.log("PrincipalToken already deployed at:", existingAddress);
-            ptToken = PrincipalToken(existingAddress);
-        } else {
-            ptToken = new PrincipalToken(address(protocol));
-            console.log("PT Token deployed at:", address(ptToken));
             
-            // Format PrincipalToken contract info correctly as a nested object
+            // Format PrincipalToken object
             string memory ptTokenObj = "{";
             ptTokenObj = string(abi.encodePacked(ptTokenObj, "\"address\":\"", vm.toString(address(ptToken)), "\","));
             ptTokenObj = string(abi.encodePacked(ptTokenObj, "\"contract\":\"src/tokens/PrincipalToken.sol:PrincipalToken\","));
@@ -274,11 +328,11 @@ contract DeployContracts is Script {
             ptTokenObj = string(abi.encodePacked(ptTokenObj, "}"));
             
             // Add to JSON
-            if (bytes(deploymentJson).length > 2) { // If not just "{}"
-                deploymentJson = string(abi.encodePacked(deploymentJson, ",\"PrincipalToken\":", ptTokenObj));
-            } else {
-                deploymentJson = string(abi.encodePacked("{\"PrincipalToken\":", ptTokenObj));
-            }
+            deploymentJson = string(abi.encodePacked(deploymentJson, ",\"PrincipalToken\":", ptTokenObj));
+        }
+        // Handle cases where one token is deployed but not the other
+        else {
+            revert("Inconsistent deployment state: one token deployed but not the other");
         }
         
         // Deploy YieldSwapHook if not already deployed

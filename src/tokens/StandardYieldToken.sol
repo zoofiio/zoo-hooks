@@ -10,6 +10,10 @@ import {EnumerableSet} from "openzeppelin/utils/structs/EnumerableSet.sol";
 contract StandardYieldToken is ProtocolOwner, ERC20, ERC20Burnable, ReentrancyGuard {
     constructor(address _protocol) ProtocolOwner(_protocol) ERC20("Zoo Standard Yield Token", "SY") {}
 
+    function isSY() public pure returns (bool) {
+        return true;
+    }
+
     function mint(address to, uint256 value) public virtual nonReentrant onlyOwner{
         _mint(to, value);
     }

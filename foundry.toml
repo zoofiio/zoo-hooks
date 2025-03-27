@@ -29,4 +29,4 @@ number_underscore = "thousands"
 sepolia = { key = "${ETHERSCAN_API_KEY}" }
 mainnet = { key = "${ETHERSCAN_API_KEY}" }
 base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
-arbitrum = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api" } # Added Arbiscan
+arbitrum = { key = "${ARBISCAN_API_KEY}" }
