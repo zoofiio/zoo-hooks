@@ -404,7 +404,7 @@ contract YieldSwapHookTest is Test, Deployers {
         (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
         
         uint256 syAmount = 10 ether;
-        uint256 expectedPTAmount = hook.getQuote(key, syAmount);
+        uint256 expectedPTAmount = hook.getSYtoPTAmountOut(syAmount);
         console.log("Expected PT amount: ", expectedPTAmount);
         
         IPoolManager.SwapParams memory params =
@@ -456,7 +456,7 @@ contract YieldSwapHookTest is Test, Deployers {
         uint256 ptAmount = 10 ether;
         
         // Get expected SY amount using the new helper function
-        uint256 expectedSYAmount = hook.getQuotePTtoSY(ptAmount);
+        uint256 expectedSYAmount = hook.getPTtoSYAmountOut(ptAmount);
         console.log("Expected SY amount: ", expectedSYAmount);
         
         IPoolManager.SwapParams memory params =
@@ -512,7 +512,7 @@ contract YieldSwapHookTest is Test, Deployers {
         uint256 prevBalance1 = key.currency1.balanceOf(address(this)); // PT balance
         
         // Get the required PT input for the desired SY output using the helper function
-        uint256 expectedPTInput = hook.getRequiredPTforSY(desiredSYAmount);
+        uint256 expectedPTInput = hook.getPTtoSYAmountIn(desiredSYAmount);
         console.log("Expected PT input for desired SY:", expectedPTInput);
         
         (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
@@ -558,19 +558,19 @@ contract YieldSwapHookTest is Test, Deployers {
         uint256 ptAmount = 10 ether;
         
         // Get quote at beginning of epoch
-        uint256 quoteStart = hook.getQuotePTtoSY(ptAmount);
+        uint256 quoteStart = hook.getPTtoSYAmountOut(ptAmount);
         
         // Time travel to middle of epoch
         vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
         
         // Get quote at middle of epoch
-        uint256 quoteMid = hook.getQuotePTtoSY(ptAmount);
+        uint256 quoteMid = hook.getPTtoSYAmountOut(ptAmount);
         
         // Time travel to end of epoch
         vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
         
         // Get quote at end of epoch
-        uint256 quoteEnd = hook.getQuotePTtoSY(ptAmount);
+        uint256 quoteEnd = hook.getPTtoSYAmountOut(ptAmount);
         
         console.log("SY quote at start:", quoteStart);
         console.log("SY quote at middle:", quoteMid);
@@ -592,8 +592,8 @@ contract YieldSwapHookTest is Test, Deployers {
         uint256 amount = 1 ether; // Use a small amount to minimize price impact
         
         // Get quotes for both directions
-        uint256 ptFromSY = hook.getQuote(key, amount);
-        uint256 syFromPT = hook.getQuotePTtoSY(amount);
+        uint256 ptFromSY = hook.getSYtoPTAmountOut(amount);
+        uint256 syFromPT = hook.getPTtoSYAmountOut(amount);
         
         console.log("1 SY gets you (PT):", ptFromSY);
         console.log("1 PT gets you (SY):", syFromPT);
@@ -623,7 +623,7 @@ contract YieldSwapHookTest is Test, Deployers {
         );
         
         uint256 ptAmount = 100 ether;
-        uint256 expectedSYAmount = hook.getQuotePTtoSY(ptAmount);
+        uint256 expectedSYAmount = hook.getPTtoSYAmountOut(ptAmount);
         console.log("Expected SY for 100 PT:", expectedSYAmount);
         
         uint256 prevSYBalance = key.currency0.balanceOf(address(this));
@@ -648,7 +648,7 @@ contract YieldSwapHookTest is Test, Deployers {
         // With a large swap, we should see significant price impact
         // Let's try another small swap to see the change in rate
         uint256 smallPtAmount = 1 ether;
-        uint256 newExpectedSYAmount = hook.getQuotePTtoSY(smallPtAmount);
+        uint256 newExpectedSYAmount = hook.getPTtoSYAmountOut(smallPtAmount);
         console.log("New expected SY for 1 PT:", newExpectedSYAmount);
         
         // The rate should be worse now (less SY per PT) due to decreased SY reserves
@@ -748,7 +748,7 @@ contract YieldSwapHookTest is Test, Deployers {
         assertTrue(implicitFee < syToSwap / 10, "Fee should be less than 10% of swap amount");
     }
     
-    // Test the getQuotePTtoSY and getRequiredPTforSY functions with various amounts
+    // Test the getPTtoSYAmountOut and getPTtoSYAmountIn functions with various amounts
     function test_PT_to_SY_quote_functions() public {
         hook.addLiquidity(
             ZooCustomAccounting.AddLiquidityParams(
@@ -756,7 +756,7 @@ contract YieldSwapHookTest is Test, Deployers {
             )
         );
         
-        // Test exact input quotes (getQuotePTtoSY)
+        // Test exact input quotes (getPTtoSYAmountOut)
         uint256[] memory ptAmounts = new uint256[](4);
         ptAmounts[0] = 0.1 ether;
         ptAmounts[1] = 1 ether;
@@ -764,7 +764,7 @@ contract YieldSwapHookTest is Test, Deployers {
         ptAmounts[3] = 10 ether;
         
         for (uint i = 0; i < ptAmounts.length; i++) {
-            uint256 expectedSYOutput = hook.getQuotePTtoSY(ptAmounts[i]);
+            uint256 expectedSYOutput = hook.getPTtoSYAmountOut(ptAmounts[i]);
             console.log("PT input:", ptAmounts[i] / 1 ether);
             console.log("Expected SY output:", expectedSYOutput / 1 ether);
             
@@ -798,7 +798,7 @@ contract YieldSwapHookTest is Test, Deployers {
             }
         }
         
-        // Test exact output quotes (getRequiredPTforSY)
+        // Test exact output quotes (getPTtoSYAmountIn)
         uint256[] memory syAmounts = new uint256[](4);
         syAmounts[0] = 0.1 ether;
         syAmounts[1] = 1 ether;
@@ -813,7 +813,7 @@ contract YieldSwapHookTest is Test, Deployers {
         );
         
         for (uint i = 0; i < syAmounts.length; i++) {
-            uint256 expectedPTInput = hook.getRequiredPTforSY(syAmounts[i]);
+            uint256 expectedPTInput = hook.getPTtoSYAmountIn(syAmounts[i]);
             console.log("SY output desired:", syAmounts[i] / 1 ether);
             console.log("Expected PT input:", expectedPTInput / 1 ether);
             

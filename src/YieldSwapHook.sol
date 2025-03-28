@@ -711,21 +711,19 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     
     /**
      * @notice Get PT quote for a specific SY amount (SY to PT exactInput)
-     * @param key The pool key
      * @param sYAmount Amount of SY tokens to swap
      * @return ptAmount Estimated PT tokens to receive
      */
-    function getQuote(PoolKey calldata key, uint256 sYAmount) external view returns (uint256 ptAmount) {
+    function getSYtoPTAmountOut(uint256 sYAmount) external view returns (uint256 ptAmount) {
         return _getSYtoPTAmountOut(sYAmount);
     }
     
     /**
      * @notice Get SY amount required for a specific PT amount (SY to PT exactOutput)
-     * @param key The pool key
      * @param ptAmount Desired amount of PT tokens to receive
      * @return syAmount Required SY tokens to provide
      */
-    function getRequiredInputForOutput(PoolKey calldata key, uint256 ptAmount) external view returns (uint256 syAmount) {
+    function getSYtoPTAmountIn(uint256 ptAmount) external view returns (uint256 syAmount) {
         return _getSYtoPTAmountIn(ptAmount);
     }
     
@@ -734,7 +732,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
      * @param ptAmount Amount of PT tokens to swap
      * @return syAmount Estimated SY tokens to receive
      */
-    function getQuotePTtoSY(uint256 ptAmount) external view returns (uint256 syAmount) {
+    function getPTtoSYAmountOut(uint256 ptAmount) external view returns (uint256 syAmount) {
         return _getPTtoSYAmountOut(ptAmount);
     }
     
@@ -743,7 +741,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
      * @param syAmount Desired amount of SY tokens to receive
      * @return ptAmount Required PT tokens to provide
      */
-    function getRequiredPTforSY(uint256 syAmount) external view returns (uint256 ptAmount) {
+    function getPTtoSYAmountIn(uint256 syAmount) external view returns (uint256 ptAmount) {
         return _getPTtoSYAmountIn(syAmount);
     }
 }

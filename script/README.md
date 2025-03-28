@@ -61,7 +61,7 @@ source .env
 export NETWORK=arbitrum
 forge script script/AddInitialLiquidity.s.sol --rpc-url arbitrum --broadcast
 
-# Swap SY -> PT
+# Swap
 forge script script/SwapTokens.s.sol --rpc-url arbitrum --broadcast
 ```
 
