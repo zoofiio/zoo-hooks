@@ -53,7 +53,6 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     uint256 public constant MINIMUM_LIQUIDITY = 1000;
     
     // Error declarations
-    error OnlySYToPTSwapsSupported();
     error InvalidHookConfiguration();
     error MathError();
     error InsufficientPTReserves();
@@ -139,6 +138,22 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         return firstComponent + secondComponent;
     }
 
+    /**
+     * @notice Helper function to calculate PT to SY price (inverse of SY to PT price)
+     * @dev Price_PT = 1 / Price_SY when Price_SY > 0
+     * @param priceSY The SY to PT price (scaled by 1e18)
+     * @return pricePT The PT to SY price (scaled by 1e18)
+     */
+    function calculateInversePrice(int256 priceSY) internal pure returns (int256 pricePT) {
+        // Handle edge cases
+        if (priceSY <= 0) revert MathError(); // Price must be positive for inverse
+        
+        // Calculate inverse price: 1e18 / priceSY (maintaining 1e18 scaling)
+        pricePT = int256(FullMath.mulDiv(1e18, 1e18, uint256(priceSY)));
+        
+        return pricePT;
+    }
+
     // Externally visible helper function to get reserves for testing
     function getReserves(PoolKey calldata /* key */) external view returns (uint256 reserve0, uint256 reserve1) {
         return (reserveSY, reservePT);
@@ -161,7 +176,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
 
     /**
      * @notice Implementation of BaseCustomCurve's _getUnspecifiedAmount
-     * @dev Supports both exact input (amountSpecified < 0) and exact output (amountSpecified > 0) swaps
+     * @dev Supports both SY to PT and PT to SY swaps in both exact input and exact output modes
      */
     function _getUnspecifiedAmount(IPoolManager.SwapParams calldata params)
         internal
@@ -169,36 +184,39 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         override
         returns (uint256 unspecifiedAmount)
     {
-        // Then check swap direction
+        // Check swap direction and type
         if (params.zeroForOne) {
+            // SY -> PT swap
             if (params.amountSpecified < 0) {
                 // Exact input SY -> PT swap
                 uint256 amountIn = uint256(-params.amountSpecified);
-                return _getAmountOutFromExactInput(amountIn, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+                return _getSYtoPTAmountOut(amountIn);
             } else {
                 // Exact output SY -> PT swap
                 uint256 amountOut = uint256(params.amountSpecified);
-                return _getAmountInForExactOutput(amountOut, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+                return _getSYtoPTAmountIn(amountOut);
             }
         } else {
-            // For PT to SY swaps (zeroForOne = false) - not supported in our model
-            revert OnlySYToPTSwapsSupported();
+            // PT -> SY swap
+            if (params.amountSpecified < 0) {
+                // Exact input PT -> SY swap
+                uint256 amountIn = uint256(-params.amountSpecified);
+                return _getPTtoSYAmountOut(amountIn);
+            } else {
+                // Exact output PT -> SY swap
+                uint256 amountOut = uint256(params.amountSpecified);
+                return _getPTtoSYAmountIn(amountOut);
+            }
         }
     }
     
     /**
-     * @notice Calculate output amount (PT) given exact input amount (SY)
+     * @notice Calculate output amount of PT given an exact input amount of SY
+     * @param amountIn Amount of SY tokens to swap
+     * @return amountOut Amount of PT tokens to receive
      */
-    function _getAmountOutFromExactInput(
-        uint256 amountIn,
-        Currency /* input */,
-        Currency /* output */,
-        bool zeroForOne
-    ) internal view virtual returns (uint256 amountOut) {
-        // In our model, we only support SY to PT swaps (zeroForOne = true)
-        if (!zeroForOne) revert OnlySYToPTSwapsSupported();
-        
-        // Instead of checking initialized, check if poolKey is set
+    function _getSYtoPTAmountOut(uint256 amountIn) internal view returns (uint256 amountOut) {
+        // Check if poolKey is set
         if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
         
         // Use our tracked reserves
@@ -208,41 +226,39 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         uint256 totalReserve = reserve0 + reserve1;
         if (totalReserve == 0) revert InvalidHookConfiguration();
         
-        // Calculate portion_PT before swap using mulDiv for safety
+        // Calculate portion_PT before swap
         uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
         
-        // Calculate Price_SY_Before using current time-based parameters
+        // Calculate Price_SY_Before
         int256 priceSYBefore = calculatePrice(portionPTBefore);
         
         // Calculate reserves after swap
         uint256 reserve0After = reserve0 + amountIn;
         
-        // Estimate output using initial price - handle signed arithmetic carefully
+        // Estimate output using initial price
         uint256 estimatedDeltaPT;
         if (priceSYBefore >= 0) {
             estimatedDeltaPT = FullMath.mulDiv(amountIn, uint256(priceSYBefore), 1e18);
         } else {
-            // If price is negative (unusual but possible in some models), we'd get zero PT
             estimatedDeltaPT = 0;
         }
         
         uint256 reserve1After = reserve1 > estimatedDeltaPT ? reserve1 - estimatedDeltaPT : 0;
         uint256 totalReserveAfter = reserve0After + reserve1After;
         
-        // Calculate portion_PT after swap using mulDiv
+        // Calculate portion_PT after swap
         uint256 portionPTAfter = FullMath.mulDiv(reserve1After, 1e18, totalReserveAfter);
         
-        // Calculate Price_SY_After using current time-based parameters
+        // Calculate Price_SY_After
         int256 priceSYAfter = calculatePrice(portionPTAfter);
         
         // Calculate average price
         int256 avgPrice = (priceSYBefore + priceSYAfter) / 2;
         
-        // Calculate final output amount (PT) - handle signed arithmetic carefully
+        // Calculate final output amount (PT)
         if (avgPrice >= 0) {
             amountOut = FullMath.mulDiv(amountIn, uint256(avgPrice), 1e18);
         } else {
-            // If average price is negative, return zero
             amountOut = 0;
         }
         
@@ -253,19 +269,12 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     }
     
     /**
-     * @notice Calculate input amount (SY) needed for exact output amount (PT)
-     * @dev Used for exactOutput swaps where user specifies exact PT amount to receive
+     * @notice Calculate input amount of SY needed for exact output amount of PT
+     * @param amountOut Desired amount of PT tokens to receive
+     * @return amountIn Required amount of SY tokens to provide
      */
-    function _getAmountInForExactOutput(
-        uint256 amountOut,
-        Currency /* input */,
-        Currency /* output */,
-        bool zeroForOne
-    ) internal view virtual returns (uint256 amountIn) {
-        // In our model, we only support SY to PT swaps (zeroForOne = true)
-        if (!zeroForOne) revert OnlySYToPTSwapsSupported();
-        
-        // Instead of checking initialized, check if poolKey is set
+    function _getSYtoPTAmountIn(uint256 amountOut) internal view returns (uint256 amountIn) {
+        // Check if poolKey is set
         if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
         
         // Ensure there's enough PT in the pool
@@ -278,43 +287,34 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         uint256 totalReserve = reserve0 + reserve1;
         if (totalReserve == 0) revert InvalidHookConfiguration();
         
-        // Calculate portion_PT before swap using mulDiv for safety
+        // Calculate portion_PT before swap
         uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
         
-        // Calculate Price_SY_Before using current time-based parameters
+        // Calculate Price_SY_Before
         int256 priceSYBefore = calculatePrice(portionPTBefore);
         
-        // Calculate reserves after swap
-        uint256 reserve1After = reserve1 - amountOut;
-        
-        // Initial estimate for amountIn using price before swap
-        // Note: This is just an initial approximation
+        // Initial estimate for amountIn
         uint256 initialAmountIn;
         if (priceSYBefore > 0) {
             initialAmountIn = FullMath.mulDiv(amountOut, 1e18, uint256(priceSYBefore));
         } else {
-            // If price is non-positive (unusual but possible), set a high estimate
-            initialAmountIn = FullMath.mulDiv(amountOut, 2e18, 1); // 2x ratio as starting point
+            initialAmountIn = amountOut * 2;
         }
         
         // Iterative binary search to find the exact input amount
-        // This approach works better than a direct formula for complex pricing functions
         uint256 low = 0;
-        uint256 high = initialAmountIn * 2; // Start with 2x the initial estimate as upper bound
-        uint256 maxIterations = 32; // Limit iterations for gas efficiency
+        uint256 high = initialAmountIn * 2;
+        uint256 maxIterations = 32;
         
         for (uint256 i = 0; i < maxIterations; i++) {
-            // Calculate mid point
             uint256 mid = (low + high) / 2;
             
-            // Skip calculation if low and high converged
             if (mid == low || mid == high) {
-                amountIn = high; // Choose the higher value to ensure enough input
+                amountIn = high;
                 break;
             }
             
-            // Calculate output for the current mid input
-            // Use current reserves + mid as the new state
+            // Test this input amount
             uint256 reserve0Test = reserve0 + mid;
             uint256 totalReserveTest = reserve0Test + reserve1;
             uint256 portionPTTest = FullMath.mulDiv(reserve1, 1e18, totalReserveTest);
@@ -327,29 +327,196 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
                 outputTest = 0;
             }
             
-            // Adjust search bounds based on result
             if (outputTest < amountOut) {
-                // Need more input
                 low = mid;
             } else {
-                // Too much input
                 high = mid;
-                
-                // If we found a valid solution, remember it
                 if (outputTest >= amountOut) {
                     amountIn = mid;
                 }
             }
         }
         
-        // Final check - make sure we have a valid amountIn
+        // Final check
         if (amountIn == 0) {
-            // Fallback to a conservative estimate if binary search failed
             if (priceSYBefore > 0) {
-                amountIn = FullMath.mulDiv(amountOut, 12e17, uint256(priceSYBefore)); // 1.2x to be safe
+                amountIn = FullMath.mulDiv(amountOut, 12e17, uint256(priceSYBefore));
             } else {
-                // Extremely conservative estimate for unusual price situations
-                amountIn = amountOut * 3; // 3x as a fallback
+                amountIn = amountOut * 3;
+            }
+        }
+        
+        return amountIn;
+    }
+    
+    /**
+     * @notice Calculate output amount of SY given exact input amount of PT
+     * @param amountIn Amount of PT tokens to swap
+     * @return amountOut Amount of SY tokens to receive
+     */
+    function _getPTtoSYAmountOut(uint256 amountIn) internal view returns (uint256 amountOut) {
+        // Check if poolKey is set
+        if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
+        
+        // Use our tracked reserves
+        uint256 reserve0 = reserveSY;
+        uint256 reserve1 = reservePT;
+        
+        uint256 totalReserve = reserve0 + reserve1;
+        if (totalReserve == 0) revert InvalidHookConfiguration();
+        
+        // Calculate portion_PT before swap
+        uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
+        
+        // Calculate Price_SY_Before
+        int256 priceSYBefore = calculatePrice(portionPTBefore);
+        
+        // Calculate Price_PT_Before (inverse of Price_SY_Before)
+        int256 pricePTBefore;
+        if (priceSYBefore > 0) {
+            pricePTBefore = calculateInversePrice(priceSYBefore);
+        } else {
+            revert MathError(); // Cannot calculate with non-positive price
+        }
+        
+        // Calculate reserves after swap
+        uint256 reserve1After = reserve1 + amountIn;
+        
+        // Estimate output using initial price
+        uint256 estimatedDeltaSY;
+        if (pricePTBefore >= 0) {
+            estimatedDeltaSY = FullMath.mulDiv(amountIn, uint256(pricePTBefore), 1e18);
+        } else {
+            estimatedDeltaSY = 0;
+        }
+        
+        uint256 reserve0After = reserve0 > estimatedDeltaSY ? reserve0 - estimatedDeltaSY : 0;
+        uint256 totalReserveAfter = reserve0After + reserve1After;
+        
+        // Calculate portion_PT after swap
+        uint256 portionPTAfter = FullMath.mulDiv(reserve1After, 1e18, totalReserveAfter);
+        
+        // Calculate Price_SY_After
+        int256 priceSYAfter = calculatePrice(portionPTAfter);
+        
+        // Calculate Price_PT_After
+        int256 pricePTAfter;
+        if (priceSYAfter > 0) {
+            pricePTAfter = calculateInversePrice(priceSYAfter);
+        } else {
+            // Fallback to pre-swap price
+            pricePTAfter = pricePTBefore;
+        }
+        
+        // Calculate average price
+        int256 avgPrice = (pricePTBefore + pricePTAfter) / 2;
+        
+        // Calculate final output amount (SY)
+        if (avgPrice >= 0) {
+            amountOut = FullMath.mulDiv(amountIn, uint256(avgPrice), 1e18);
+        } else {
+            amountOut = 0;
+        }
+        
+        // Ensure there's enough SY in the pool
+        if (amountOut > reserve0) revert InsufficientSYReserves();
+        
+        return amountOut;
+    }
+    
+    /**
+     * @notice Calculate input amount of PT needed for exact output amount of SY
+     * @param amountOut Desired amount of SY tokens to receive
+     * @return amountIn Required amount of PT tokens to provide
+     */
+    function _getPTtoSYAmountIn(uint256 amountOut) internal view returns (uint256 amountIn) {
+        // Check if poolKey is set
+        if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
+        
+        // Ensure there's enough SY in the pool
+        if (amountOut > reserveSY) revert InsufficientSYReserves();
+        
+        // Use our tracked reserves
+        uint256 reserve0 = reserveSY;
+        uint256 reserve1 = reservePT;
+        
+        uint256 totalReserve = reserve0 + reserve1;
+        if (totalReserve == 0) revert InvalidHookConfiguration();
+        
+        // Calculate portion_PT before swap
+        uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
+        
+        // Calculate Price_SY_Before
+        int256 priceSYBefore = calculatePrice(portionPTBefore);
+        
+        // Calculate Price_PT_Before (inverse of Price_SY_Before)
+        int256 pricePTBefore;
+        if (priceSYBefore > 0) {
+            pricePTBefore = calculateInversePrice(priceSYBefore);
+        } else {
+            revert MathError(); // Cannot calculate with non-positive price
+        }
+        
+        // Calculate reserves after swap
+        uint256 reserve0After = reserve0 - amountOut;
+        
+        // Initial estimate for amountIn
+        uint256 initialAmountIn;
+        if (pricePTBefore > 0) {
+            initialAmountIn = FullMath.mulDiv(amountOut, 1e18, uint256(pricePTBefore));
+        } else {
+            initialAmountIn = amountOut * 2;
+        }
+        
+        // Iterative binary search to find the exact input amount
+        uint256 low = 0;
+        uint256 high = initialAmountIn * 2;
+        uint256 maxIterations = 32;
+        
+        for (uint256 i = 0; i < maxIterations; i++) {
+            uint256 mid = (low + high) / 2;
+            
+            if (mid == low || mid == high) {
+                amountIn = high;
+                break;
+            }
+            
+            // Test this input amount
+            uint256 reserve1Test = reserve1 + mid;
+            uint256 totalReserveTest = reserve0 + reserve1Test;
+            uint256 portionPTTest = FullMath.mulDiv(reserve1Test, 1e18, totalReserveTest);
+            int256 priceSYTest = calculatePrice(portionPTTest);
+            
+            int256 pricePTTest;
+            if (priceSYTest > 0) {
+                pricePTTest = calculateInversePrice(priceSYTest);
+            } else {
+                pricePTTest = 0;
+            }
+            
+            uint256 outputTest;
+            if (pricePTTest > 0) {
+                outputTest = FullMath.mulDiv(mid, uint256(pricePTTest), 1e18);
+            } else {
+                outputTest = 0;
+            }
+            
+            if (outputTest < amountOut) {
+                low = mid;
+            } else {
+                high = mid;
+                if (outputTest >= amountOut) {
+                    amountIn = mid;
+                }
+            }
+        }
+        
+        // Final check
+        if (amountIn == 0) {
+            if (pricePTBefore > 0) {
+                amountIn = FullMath.mulDiv(amountOut, 12e17, uint256(pricePTBefore));
+            } else {
+                amountIn = amountOut * 3;
             }
         }
         
@@ -417,50 +584,70 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         IPoolManager.SwapParams calldata params,
         bytes calldata hookData
     ) internal virtual override returns (bytes4, BeforeSwapDelta, uint24) {
-        // Only handle SY to PT swaps (zeroForOne = true)
-        if (!params.zeroForOne) {
-            revert OnlySYToPTSwapsSupported();
-        }
+        // Now supporting both SY to PT swaps (zeroForOne = true) and PT to SY swaps (zeroForOne = false)
         
-        // Handle both exactInput and exactOutput swaps
-        if (params.amountSpecified < 0) {
-            // Exact input swap (SY -> PT)
-            uint256 specifiedAmount = uint256(-params.amountSpecified);
-            uint256 unspecifiedAmount = _getAmountOutFromExactInput(
-                specifiedAmount, 
-                poolKey.currency0,
-                poolKey.currency1,
-                params.zeroForOne
-            );
-            
-            // Call parent implementation to handle token settlement
-            (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
-            
-            // Update our reserves after parent implementation
-            reserveSY += specifiedAmount;
-            reservePT -= unspecifiedAmount;
-            
-            emit ReservesUpdated(reserveSY, reservePT);
-            return (selector, delta, fee);
+        if (params.zeroForOne) {
+            // SY to PT swap
+            if (params.amountSpecified < 0) {
+                // Exact input swap (SY -> PT)
+                uint256 specifiedAmount = uint256(-params.amountSpecified);
+                uint256 unspecifiedAmount = _getSYtoPTAmountOut(specifiedAmount);
+                
+                // Call parent implementation to handle token settlement
+                (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+                
+                // Update our reserves after parent implementation
+                reserveSY += specifiedAmount;
+                reservePT -= unspecifiedAmount;
+                
+                emit ReservesUpdated(reserveSY, reservePT);
+                return (selector, delta, fee);
+            } else {
+                // Exact output swap (SY -> PT)
+                uint256 specifiedAmount = uint256(params.amountSpecified);
+                uint256 unspecifiedAmount = _getSYtoPTAmountIn(specifiedAmount);
+                
+                // Call parent implementation to handle token settlement
+                (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+                
+                // Update our reserves after parent implementation
+                reserveSY += unspecifiedAmount;
+                reservePT -= specifiedAmount;
+                
+                emit ReservesUpdated(reserveSY, reservePT);
+                return (selector, delta, fee);
+            }
         } else {
-            // Exact output swap (SY -> PT)
-            uint256 specifiedAmount = uint256(params.amountSpecified);
-            uint256 unspecifiedAmount = _getAmountInForExactOutput(
-                specifiedAmount, 
-                poolKey.currency0,
-                poolKey.currency1,
-                params.zeroForOne
-            );
-            
-            // Call parent implementation to handle token settlement
-            (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
-            
-            // Update our reserves after parent implementation
-            reserveSY += unspecifiedAmount;
-            reservePT -= specifiedAmount;
-            
-            emit ReservesUpdated(reserveSY, reservePT);
-            return (selector, delta, fee);
+            // PT to SY swap
+            if (params.amountSpecified < 0) {
+                // Exact input swap (PT -> SY)
+                uint256 specifiedAmount = uint256(-params.amountSpecified);
+                uint256 unspecifiedAmount = _getPTtoSYAmountOut(specifiedAmount);
+                
+                // Call parent implementation to handle token settlement
+                (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+                
+                // Update our reserves after parent implementation
+                reservePT += specifiedAmount;
+                reserveSY -= unspecifiedAmount;
+                
+                emit ReservesUpdated(reserveSY, reservePT);
+                return (selector, delta, fee);
+            } else {
+                // Exact output swap (PT -> SY)
+                uint256 specifiedAmount = uint256(params.amountSpecified);
+                uint256 unspecifiedAmount = _getPTtoSYAmountIn(specifiedAmount);
+                
+                // Call parent implementation to handle token settlement
+                (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+                
+                // Update our reserves after parent implementation
+                reservePT += unspecifiedAmount;
+                reserveSY -= specifiedAmount;
+                
+                emit ReservesUpdated(reserveSY, reservePT);
+                return (selector, delta, fee);
+            }
         }
     }
     
@@ -523,22 +710,40 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     }
     
     /**
-     * @notice Get PT quote for a specific SY amount (exactInput)
+     * @notice Get PT quote for a specific SY amount (SY to PT exactInput)
      * @param key The pool key
      * @param sYAmount Amount of SY tokens to swap
      * @return ptAmount Estimated PT tokens to receive
      */
     function getQuote(PoolKey calldata key, uint256 sYAmount) external view returns (uint256 ptAmount) {
-        return _getAmountOutFromExactInput(sYAmount, key.currency0, key.currency1, true);
+        return _getSYtoPTAmountOut(sYAmount);
     }
     
     /**
-     * @notice Get SY amount required for a specific PT amount (exactOutput)
+     * @notice Get SY amount required for a specific PT amount (SY to PT exactOutput)
      * @param key The pool key
      * @param ptAmount Desired amount of PT tokens to receive
      * @return syAmount Required SY tokens to provide
      */
     function getRequiredInputForOutput(PoolKey calldata key, uint256 ptAmount) external view returns (uint256 syAmount) {
-        return _getAmountInForExactOutput(ptAmount, key.currency0, key.currency1, true);
+        return _getSYtoPTAmountIn(ptAmount);
+    }
+    
+    /**
+     * @notice Get SY quote for a specific PT amount (PT to SY exactInput)
+     * @param ptAmount Amount of PT tokens to swap
+     * @return syAmount Estimated SY tokens to receive
+     */
+    function getQuotePTtoSY(uint256 ptAmount) external view returns (uint256 syAmount) {
+        return _getPTtoSYAmountOut(ptAmount);
+    }
+    
+    /**
+     * @notice Get PT amount required for a specific SY amount (PT to SY exactOutput) 
+     * @param syAmount Desired amount of SY tokens to receive
+     * @return ptAmount Required PT tokens to provide
+     */
+    function getRequiredPTforSY(uint256 syAmount) external view returns (uint256 ptAmount) {
+        return _getPTtoSYAmountIn(syAmount);
     }
 }

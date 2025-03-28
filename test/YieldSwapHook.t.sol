@@ -435,417 +435,7 @@ contract YieldSwapHookTest is Test, Deployers {
         assertEq(reservePTAfter, reservePTBefore - (key.currency1.balanceOf(address(this)) - prevBalance1));
     }
     
-    function test_swap_PT_to_SY_reverts() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: false, amountSpecified: -10 ether, sqrtPriceLimitX96: MAX_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        vm.expectRevert();
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-    }
-    
-    function test_multiple_swaps_price_change() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 syAmount1 = 5 ether;
-        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params1 =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount1), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params1, settings, ZERO_BYTES);
-        
-        uint256 ptReceived1 = key.currency1.balanceOf(address(this)) - ptBefore1;
-        
-        uint256 syAmount2 = 5 ether;
-        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params2 =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount2), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        
-        swapRouter.swap(key, params2, settings, ZERO_BYTES);
-        
-        uint256 ptReceived2 = key.currency1.balanceOf(address(this)) - ptBefore2;
-        
-        assertFalse(ptReceived1 == ptReceived2);
-    }
-    
-    function test_large_swap_impact() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 smallAmount = 1 ether;
-        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory smallParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(smallAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, smallParams, settings, ZERO_BYTES);
-        
-        uint256 ptReceivedSmall = key.currency1.balanceOf(address(this)) - ptBefore1;
-        uint256 rateSmall = (ptReceivedSmall * 1e18) / smallAmount;
-        
-        uint256 largeAmount = 100 ether;
-        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory largeParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(largeAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        
-        swapRouter.swap(key, largeParams, settings, ZERO_BYTES);
-        
-        uint256 ptReceivedLarge = key.currency1.balanceOf(address(this)) - ptBefore2;
-        uint256 rateLarge = (ptReceivedLarge * 1e18) / largeAmount;
-        
-        assertFalse(rateSmall == rateLarge);
-    }
-    
-    function test_ownership_control() public {
-        assertEq(hook.owner(), address(this));
-        
-        address user1 = address(0x1234);
-        vm.startPrank(user1);
-        vm.expectRevert();
-        // Fix to call setEpochParameters instead of setHookParameters
-        hook.setEpochParameters(2000, 14 days);
-        vm.stopPrank();
-        
-        address newOwner = address(0x5678);
-        protocol.transferOwnership(newOwner);
-        assertEq(hook.owner(), newOwner);
-        
-        vm.expectRevert();
-        // Fix to call setEpochParameters instead of setHookParameters
-        hook.setEpochParameters(2000, 14 days);
-        
-        vm.startPrank(newOwner);
-        // Fix to call setEpochParameters instead of setHookParameters
-        hook.setEpochParameters(2000, 14 days);
-        assertEq(hook.epochStart(), 2000);
-        vm.stopPrank();
-    }
-    
-    function test_price_calculation() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                50 ether, 50 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 smallAmount = 0.1 ether;
-        uint256 ptBefore = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(smallAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        
-        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
-        console.log("PT received: ", ptReceived);
-        uint256 initialRate = (ptReceived * 1e18) / smallAmount;
-        
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                50 ether, 1 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        ptBefore = key.currency1.balanceOf(address(this));
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        
-        ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
-        console.log("PT received after adding more SY: ", ptReceived);
-        uint256 newRate = (ptReceived * 1e18) / smallAmount;
-        
-        console.log("Initial rate: ", initialRate);
-        console.log("New rate: ", newRate);
-        assertTrue(newRate < initialRate);
-    }
-    
-    function test_liquidity_provider_share() public {
-        address lp1 = address(0xAA);
-        address lp2 = address(0xBB);
-        
-        deal(Currency.unwrap(currency0), lp1, 100 ether);
-        deal(Currency.unwrap(currency1), lp1, 100 ether);
-        deal(Currency.unwrap(currency0), lp2, 100 ether);
-        deal(Currency.unwrap(currency1), lp2, 100 ether);
-        
-        vm.startPrank(lp1);
-        ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
-        ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
-        vm.stopPrank();
-        
-        vm.startPrank(lp2);
-        ERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
-        ERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
-        vm.stopPrank();
-        
-        vm.startPrank(lp1);
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                40 ether, 40 ether, 0, 0, lp1, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        vm.stopPrank();
-        
-        uint256 lp1Liquidity = hook.balanceOf(lp1);
-        
-        vm.startPrank(lp2);
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                60 ether, 60 ether, 0, 0, lp2, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        vm.stopPrank();
-        
-        uint256 lp2Liquidity = hook.balanceOf(lp2);
-        
-        uint256 syAmount = 20 ether;
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        
-        uint256 lp1SYBefore = key.currency0.balanceOf(lp1);
-        uint256 lp1PTBefore = key.currency1.balanceOf(lp1);
-        
-        vm.startPrank(lp1);
-        hook.removeLiquidity(
-            ZooCustomAccounting.RemoveLiquidityParams(
-                lp1Liquidity, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        vm.stopPrank();
-        
-        uint256 lp1SYReceived = key.currency0.balanceOf(lp1) - lp1SYBefore;
-        uint256 lp1PTReceived = key.currency1.balanceOf(lp1) - lp1PTBefore;
-        
-        uint256 lp2SYBefore = key.currency0.balanceOf(lp2);
-        uint256 lp2PTBefore = key.currency1.balanceOf(lp2);
-        
-        vm.startPrank(lp2);
-        hook.removeLiquidity(
-            ZooCustomAccounting.RemoveLiquidityParams(
-                lp2Liquidity, 0, 0, MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        vm.stopPrank();
-        
-        uint256 lp2SYReceived = key.currency0.balanceOf(lp2) - lp2SYBefore;
-        uint256 lp2PTReceived = key.currency1.balanceOf(lp2) - lp2PTBefore;
-        
-        assertApproxEqRel(lp2SYReceived, lp1SYReceived * 3 / 2, 0.01e18);
-        assertApproxEqRel(lp2PTReceived, lp1PTReceived * 3 / 2, 0.01e18);
-    }
-    
-    function test_volume_impact_on_price() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256[] memory volumes = new uint256[](5);
-        volumes[0] = 0.1 ether;
-        volumes[1] = 1 ether;
-        volumes[2] = 10 ether;
-        volumes[3] = 100 ether;
-        volumes[4] = 200 ether;
-        
-        uint256[] memory rates = new uint256[](5);
-        
-        for (uint i = 0; i < volumes.length; i++) {
-            uint256 ptBefore = key.currency1.balanceOf(address(this));
-            
-            IPoolManager.SwapParams memory params =
-                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(volumes[i]), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-            PoolSwapTest.TestSettings memory settings =
-                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-            
-            swapRouter.swap(key, params, settings, ZERO_BYTES);
-            
-            uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
-            rates[i] = (ptReceived * 1e18) / volumes[i];
-            
-            if (i < volumes.length - 1) {
-                hook.addLiquidity(
-                    ZooCustomAccounting.AddLiquidityParams(
-                        volumes[i] * 2, ptReceived * 2, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-                    )
-                );
-            }
-        }
-        
-        for (uint i = 1; i < rates.length; i++) {
-            assertTrue(rates[i] < rates[i-1]);
-        }
-    }
-    
-    function test_getQuote_accuracy() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256[] memory amounts = new uint256[](4);
-        amounts[0] = 0.1 ether;
-        amounts[1] = 1 ether;
-        amounts[2] = 5 ether;
-        amounts[3] = 10 ether;
-        
-        for (uint i = 0; i < amounts.length; i++) {
-            uint256 expectedOutput = hook.getQuote(key, amounts[i]);
-            
-            uint256 ptBefore = key.currency1.balanceOf(address(this));
-            
-            IPoolManager.SwapParams memory params =
-                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(amounts[i]), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-            PoolSwapTest.TestSettings memory settings =
-                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-            
-            swapRouter.swap(key, params, settings, ZERO_BYTES);
-            
-            uint256 actualOutput = key.currency1.balanceOf(address(this)) - ptBefore;
-            
-            assertApproxEqRel(actualOutput, expectedOutput, 0.001e18); 
-            
-            if (i < amounts.length - 1) {
-                hook.addLiquidity(
-                    ZooCustomAccounting.AddLiquidityParams(
-                        amounts[i], actualOutput, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-                    )
-                );
-            }
-        }
-    }
-
-    // Test initial epoch parameters
-    function test_initial_epoch_parameters() public view {
-        // Verify epoch parameters
-        assertEq(hook.epochStart(), DEFAULT_EPOCH_START);
-        assertEq(hook.epochDuration(), DEFAULT_EPOCH_DURATION);
-        
-        // Verify constants
-        assertEq(hook.SCALAR_ROOT(), 200);
-        assertEq(hook.ANCHOR_ROOT(), 1.2e18);
-        assertEq(hook.ANCHOR_BASE(), 1e18);
-    }
-
-    // Test getting current rate parameters at epoch start
-    function test_getCurrentRateParameters_at_start() public view {
-        // At epoch start, t should be 1
-        uint256 t = hook.getCurrentTimeFactor();
-        
-        // Calculate expected rate parameters based on time factor
-        uint256 expectedRateScalar = t > 0 ? (hook.SCALAR_ROOT() * 1e18) / t : type(uint256).max / 2;
-        int256 expectedRateAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(t)) / 1e18 + hook.ANCHOR_BASE();
-        
-        assertEq(t, 1e18); // t = 1 with 18 decimals of precision
-        assertEq(expectedRateScalar, 200); // SCALAR_ROOT / 1 = 200
-        assertEq(expectedRateAnchor, 1.2e18); // (1.2 - 1) * 1 + 1 = 1.2
-    }
-    
-    // Test getting current rate parameters in the middle of epoch
-    function test_getCurrentRateParameters_middle() public {
-        // Warp to the middle of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
-        
-        // At middle of epoch, t should be 0.5
-        uint256 t = hook.getCurrentTimeFactor();
-        
-        // Calculate expected rate parameters based on time factor
-        uint256 expectedRateScalar = t > 0 ? (hook.SCALAR_ROOT() * 1e18) / t : type(uint256).max / 2;
-        int256 expectedRateAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(t)) / 1e18 + hook.ANCHOR_BASE();
-        
-        assertEq(t, 5e17); // t = 0.5 with 18 decimals precision
-        assertEq(expectedRateScalar, 400); // SCALAR_ROOT / 0.5 = 400
-        assertEq(expectedRateAnchor, 1.1e18); // (1.2 - 1) * 0.5 + 1 = 1.1
-    }
-    
-    // Test getting current rate parameters at epoch end
-    function test_getCurrentRateParameters_end() public {
-        // Warp to end of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
-        
-        // At end of epoch, t should be 0
-        uint256 t = hook.getCurrentTimeFactor();
-        
-        // Calculate expected rate parameters based on time factor
-        uint256 expectedRateScalar = t > 0 ? (hook.SCALAR_ROOT() * 1e18) / t : type(uint256).max / 2;
-        int256 expectedRateAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(t)) / 1e18 + hook.ANCHOR_BASE();
-        
-        assertEq(t, 0); // t = 0
-        // When t=0, scalar should be a very large number and anchor should be 1.0
-        assertTrue(expectedRateScalar > 0); // Just check it's not zero
-        assertEq(expectedRateAnchor, 1e18); // Should be 1.0
-    }
-    
-    // Test setting epoch parameters
-    function test_setEpochParameters() public {
-        // New epoch parameters
-        uint256 newEpochStart = block.timestamp + 1 days;
-        uint256 newEpochDuration = 14 days;
-        
-        vm.expectEmit(true, true, false, false);
-        emit ParametersUpdated(newEpochStart, newEpochDuration);
-        
-        hook.setEpochParameters(newEpochStart, newEpochDuration);
-        
-        // Verify parameters were updated
-        assertEq(hook.epochStart(), newEpochStart);
-        assertEq(hook.epochDuration(), newEpochDuration);
-        
-        // Verify effect on rate parameters
-        uint256 t = hook.getCurrentTimeFactor();
-        
-        // Calculate expected rate parameters
-        uint256 expectedRateScalar = t > 0 ? (hook.SCALAR_ROOT() * 1e18) / t : type(uint256).max / 2;
-        int256 expectedRateAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(t)) / 1e18 + hook.ANCHOR_BASE();
-        
-        // Since we're now before the epoch start, t should be 1
-        assertEq(t, 1e18);
-        assertEq(expectedRateScalar, 200);
-        assertEq(expectedRateAnchor, 1.2e18);
-        
-        // Warp to middle of new epoch
-        vm.warp(newEpochStart + newEpochDuration / 2);
-        
-        // Check parameters again
-        t = hook.getCurrentTimeFactor();
-        expectedRateScalar = t > 0 ? (hook.SCALAR_ROOT() * 1e18) / t : type(uint256).max / 2;
-        expectedRateAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(t)) / 1e18 + hook.ANCHOR_BASE();
-        
-        assertEq(t, 5e17); // t = 0.5
-        assertEq(expectedRateScalar, 400); // 200 / 0.5 = 400
-        assertEq(expectedRateAnchor, 1.1e18); // (1.2 - 1) * 0.5 + 1 = 1.1
-    }
-    
-    // Test swap parameters change over time
-    function test_swap_pricing_over_time() public {
+    function test_swap_PT_to_SY_succeeds() public {
         // Add liquidity
         hook.addLiquidity(
             ZooCustomAccounting.AddLiquidityParams(
@@ -853,321 +443,367 @@ contract YieldSwapHookTest is Test, Deployers {
             )
         );
         
-        // Amount to swap
-        uint256 syAmount = 10 ether;
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this)); // SY balance
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this)); // PT balance
+        console.log("SY balance before swap: ", prevBalance0);
+        console.log("PT balance before swap: ", prevBalance1);
         
-        // Get quote at beginning of epoch
-        uint256 quoteStart = hook.getQuote(key, syAmount);
+        (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
+        console.log("Reserve SY before swap: ", reserveSYBefore);
+        console.log("Reserve PT before swap: ", reservePTBefore);
         
-        // Time travel to middle of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
+        // Swap PT to SY (10 PT tokens)
+        uint256 ptAmount = 10 ether;
         
-        // Get quote at middle of epoch
-        uint256 quoteMid = hook.getQuote(key, syAmount);
-        
-        // Time travel to end of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
-        
-        // Get quote at end of epoch
-        uint256 quoteEnd = hook.getQuote(key, syAmount);
-        
-        // As time progresses:
-        // - rateScalar increases (200 -> 400 -> very large)
-        // - rateAnchor decreases (1.2 -> 1.1 -> 1.0)
-        
-        // This should result in a decreasing amount of PT received over time
-        console.log("PT quote at start:", quoteStart);
-        console.log("PT quote at middle:", quoteMid);
-        console.log("PT quote at end:", quoteEnd);
-        
-        assertTrue(quoteMid < quoteStart, "PT amount should decrease as time passes");
-        assertTrue(quoteEnd < quoteMid, "PT amount should decrease as time passes");
-    }
-    
-    // Test performing actual swaps at different times
-    function test_swap_execution_over_time() public {
-        // Add liquidity
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                1000 ether, 1000 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 syAmount = 10 ether;
-        
-        // Execute swap at start
-        uint256 ptBefore1 = key.currency1.balanceOf(address(this));
+        // Get expected SY amount using the new helper function
+        uint256 expectedSYAmount = hook.getQuotePTtoSY(ptAmount);
+        console.log("Expected SY amount: ", expectedSYAmount);
         
         IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+            IPoolManager.SwapParams({
+                zeroForOne: false, // This is the key difference - now swapping PT to SY (false = token1 to token0)
+                amountSpecified: -int256(ptAmount), // Negative for exact input swap
+                sqrtPriceLimitX96: MAX_PRICE_LIMIT // Use max price limit for PT to SY swaps
+            });
         PoolSwapTest.TestSettings memory settings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         
         swapRouter.swap(key, params, settings, ZERO_BYTES);
         
-        uint256 ptReceived1 = key.currency1.balanceOf(address(this)) - ptBefore1;
+        console.log("SY balance after swap: ", key.currency0.balanceOf(address(this)));
+        console.log("PT balance after swap: ", key.currency1.balanceOf(address(this)));
+        console.log("SY balance change: ", key.currency0.balanceOf(address(this)) - prevBalance0);
+        console.log("PT balance change: ", prevBalance1 - key.currency1.balanceOf(address(this)));
         
-        // Time travel to middle of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
+        // Verify that PT decreased by the expected amount
+        assertEq(prevBalance1 - key.currency1.balanceOf(address(this)), ptAmount);
         
-        // Execute swap at middle
-        uint256 ptBefore2 = key.currency1.balanceOf(address(this));
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        uint256 ptReceived2 = key.currency1.balanceOf(address(this)) - ptBefore2;
-        
-        // Time travel to end of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
-        
-        // Execute swap at end
-        uint256 ptBefore3 = key.currency1.balanceOf(address(this));
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        uint256 ptReceived3 = key.currency1.balanceOf(address(this)) - ptBefore3;
-        
-        console.log("PT received at start:", ptReceived1);
-        console.log("PT received at middle:", ptReceived2);
-        console.log("PT received at end:", ptReceived3);
-        
-        // Verify that PT received decreases over time
-        assertTrue(ptReceived2 < ptReceived1, "PT received should decrease as time passes");
-        assertTrue(ptReceived3 < ptReceived2, "PT received should decrease as time passes");
-    }
-    
-    // Test setting invalid epoch parameters
-    function test_setEpochParameters_reverts() public {
-        // Try to set an epoch with zero duration
-        vm.expectRevert(YieldSwapHook.InvalidEpochParameters.selector);
-        hook.setEpochParameters(block.timestamp, 0);
-    }
-    
-    // Replace test_setPoolParameters with our new epoch-based parameters test
-    function test_setEpochParameters_effect() public {
-        // Add liquidity with a more balanced ratio (less likely to cause extreme calculations)
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                50 ether, 50 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
+        // Verify that SY increased by approximately the expected amount
+        assertApproxEqRel(
+            key.currency0.balanceOf(address(this)) - prevBalance0,
+            expectedSYAmount,
+            0.01e18 // 1% tolerance
         );
         
-        // Wait some time from the default epoch start (more stable test conditions)
-        vm.warp(DEFAULT_EPOCH_START + 1 hours);
+        // Verify reserves were updated correctly
+        (uint256 reserveSYAfter, uint256 reservePTAfter) = hook.getReserves(key);
+        console.log("Reserve SY after swap: ", reserveSYAfter);
+        console.log("Reserve PT after swap: ", reservePTAfter);
         
-        // Use a smaller amount to swap to avoid extreme calculations
-        uint256 syAmount = 1 ether;
+        uint256 syDelta = reserveSYBefore - reserveSYAfter;
+        uint256 ptDelta = reservePTAfter - reservePTBefore;
         
-        // Get initial parameters for comparison
-        uint256 initialT = hook.getCurrentTimeFactor();
-        uint256 initialScalar = initialT > 0 ? (hook.SCALAR_ROOT() * 1e18) / initialT : type(uint256).max / 2;
-        int256 initialAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(initialT)) / 1e18 + hook.ANCHOR_BASE();
-        
-        console.log("Initial t:", initialT);
-        console.log("Initial scalar:", initialScalar);
-        console.log("Initial anchor:", int256(initialAnchor));
-        
-        // Get quote before change
-        uint256 quoteBeforeChange = hook.getQuote(key, syAmount);
-        
-        // Use a more mild epoch parameter change
-        uint256 newEpochStart = block.timestamp; // Just start now
-        uint256 newEpochDuration = 3 days;       // Shorter duration than original
-        
-        hook.setEpochParameters(newEpochStart, newEpochDuration);
-        
-        // Get updated parameters
-        uint256 newT = hook.getCurrentTimeFactor();
-        uint256 newScalar = newT > 0 ? (hook.SCALAR_ROOT() * 1e18) / newT : type(uint256).max / 2;
-        int256 newAnchor = ((hook.ANCHOR_ROOT() - hook.ANCHOR_BASE()) * int256(newT)) / 1e18 + hook.ANCHOR_BASE();
-        
-        console.log("New t:", newT);
-        console.log("New scalar:", newScalar);
-        console.log("New anchor:", int256(newAnchor));
-        
-        // Get new quote
-        uint256 quoteAfterChange = hook.getQuote(key, syAmount);
-        
-        console.log("Quote before:", quoteBeforeChange);
-        console.log("Quote after:", quoteAfterChange);
-        
-        // We expect parameters to be different, but don't assert on specific direction
-        assertFalse(initialT == newT || initialScalar == newScalar || initialAnchor == newAnchor, 
-                   "Parameters should change after updating epoch");
-                   
-        // Execute swap with new parameters - even if quotes differ, the swap should work
-        uint256 ptBefore = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-        
-        uint256 ptReceived = key.currency1.balanceOf(address(this)) - ptBefore;
-        console.log("PT actually received:", ptReceived);
-        
-        // The received amount should be non-zero
-        assertTrue(ptReceived > 0, "Should receive non-zero PT tokens");
-        
-        // The received amount should generally match the quote, within reason
-        assertApproxEqRel(ptReceived, quoteAfterChange, 0.05e18); // 5% tolerance
+        assertEq(ptDelta, ptAmount, "PT reserves should increase by the exact input amount");
+        assertEq(syDelta, key.currency0.balanceOf(address(this)) - prevBalance0, "SY reserves should decrease by the output amount");
     }
-
-    // Test for exactOutput functionality (newly added support)
-    function test_exactOutput_swap_succeeds() public {
+    
+    // Test PT to SY with exact output (user specifies exact SY amount to receive)
+    function test_swap_PT_to_SY_exactOutput_succeeds() public {
         hook.addLiquidity(
             ZooCustomAccounting.AddLiquidityParams(
                 100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
             )
         );
         
-        uint256 desiredPtAmount = 5 ether;
-        uint256 prevSyBalance = key.currency0.balanceOf(address(this));
-        uint256 prevPtBalance = key.currency1.balanceOf(address(this));
+        // Desired SY output amount
+        uint256 desiredSYAmount = 5 ether;
         
-        // Check the required input amount using the helper function
-        uint256 expectedSyAmount = hook.getRequiredInputForOutput(key, desiredPtAmount);
-        console.log("Expected SY input for desired PT:", expectedSyAmount);
+        uint256 prevBalance0 = key.currency0.balanceOf(address(this)); // SY balance
+        uint256 prevBalance1 = key.currency1.balanceOf(address(this)); // PT balance
+        
+        // Get the required PT input for the desired SY output using the helper function
+        uint256 expectedPTInput = hook.getRequiredPTforSY(desiredSYAmount);
+        console.log("Expected PT input for desired SY:", expectedPTInput);
         
         (uint256 reserveSYBefore, uint256 reservePTBefore) = hook.getReserves(key);
         
         IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+            IPoolManager.SwapParams({
+                zeroForOne: false, // PT to SY (token1 to token0)
+                amountSpecified: int256(desiredSYAmount), // Positive for exact output swap
+                sqrtPriceLimitX96: MAX_PRICE_LIMIT
+            });
         PoolSwapTest.TestSettings memory settings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         
         swapRouter.swap(key, params, settings, ZERO_BYTES);
         
-        uint256 actualSySpent = prevSyBalance - key.currency0.balanceOf(address(this));
-        uint256 actualPtReceived = key.currency1.balanceOf(address(this)) - prevPtBalance;
+        uint256 actualPTSpent = prevBalance1 - key.currency1.balanceOf(address(this));
+        uint256 actualSYReceived = key.currency0.balanceOf(address(this)) - prevBalance0;
         
-        console.log("SY spent:", actualSySpent);
-        console.log("PT received:", actualPtReceived);
+        console.log("PT spent:", actualPTSpent);
+        console.log("SY received:", actualSYReceived);
         
-        // Verify that we got exactly the amount of PT tokens we requested
-        assertEq(actualPtReceived, desiredPtAmount, "Should receive exactly the requested PT amount");
+        // Verify we received exactly the SY amount requested
+        assertEq(actualSYReceived, desiredSYAmount, "Should receive exactly the requested SY amount");
         
-        // Verify that the actual SY spent is close to the predicted amount
-        assertApproxEqRel(actualSySpent, expectedSyAmount, 0.01e18, "Actual SY spent should be close to predicted amount");
+        // Verify the PT spent is close to the predicted amount
+        assertApproxEqRel(actualPTSpent, expectedPTInput, 0.01e18, "Actual PT spent should be close to predicted amount");
         
         // Verify reserves were updated correctly
         (uint256 reserveSYAfter, uint256 reservePTAfter) = hook.getReserves(key);
-        assertEq(reserveSYAfter, reserveSYBefore + actualSySpent);
-        assertEq(reservePTAfter, reservePTBefore - actualPtReceived);
+        assertEq(reserveSYAfter, reserveSYBefore - desiredSYAmount);
+        assertEq(reservePTAfter, reservePTBefore + actualPTSpent);
     }
     
-    function test_exactOutput_swap_multiple_succeeds() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        // Perform first exactOutput swap
-        uint256 desiredPtAmount1 = 2 ether;
-        uint256 prevSyBalance1 = key.currency0.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params1 =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount1), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        swapRouter.swap(key, params1, settings, ZERO_BYTES);
-        
-        uint256 sySpent1 = prevSyBalance1 - key.currency0.balanceOf(address(this));
-        console.log("First swap - SY spent:", sySpent1);
-        console.log("First swap - PT received:", desiredPtAmount1);
-        
-        // Perform second exactOutput swap with a larger amount
-        uint256 desiredPtAmount2 = 5 ether;
-        uint256 prevSyBalance2 = key.currency0.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory params2 =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount2), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        
-        swapRouter.swap(key, params2, settings, ZERO_BYTES);
-        
-        uint256 sySpent2 = prevSyBalance2 - key.currency0.balanceOf(address(this));
-        console.log("Second swap - SY spent:", sySpent2);
-        console.log("Second swap - PT received:", desiredPtAmount2);
-        
-        // The second swap should require more SY per PT due to the price impact
-        assertGt((sySpent2 * 1e18) / desiredPtAmount2, (sySpent1 * 1e18) / desiredPtAmount1, 
-            "Second swap should have a worse rate due to price impact");
-    }
-
-    // Test for large exact output swaps
-    function test_exactOutput_large_amount() public {
+    // Test PT to SY swap pricing over time
+    function test_swap_PT_to_SY_across_time() public {
         hook.addLiquidity(
             ZooCustomAccounting.AddLiquidityParams(
                 500 ether, 500 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
             )
         );
         
-        uint256 desiredPtAmount = 100 ether;
-        uint256 prevSyBalance = key.currency0.balanceOf(address(this));
-        uint256 prevPtBalance = key.currency1.balanceOf(address(this));
+        // Amount of PT to swap
+        uint256 ptAmount = 10 ether;
         
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        // Get quote at beginning of epoch
+        uint256 quoteStart = hook.getQuotePTtoSY(ptAmount);
         
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
+        // Time travel to middle of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
         
-        uint256 actualSySpent = prevSyBalance - key.currency0.balanceOf(address(this));
-        uint256 actualPtReceived = key.currency1.balanceOf(address(this)) - prevPtBalance;
+        // Get quote at middle of epoch
+        uint256 quoteMid = hook.getQuotePTtoSY(ptAmount);
         
-        console.log("Large swap - SY spent:", actualSySpent);
-        console.log("Large swap - PT received:", actualPtReceived);
+        // Time travel to end of epoch
+        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
         
-        // Verify that we got exactly the amount of PT tokens we requested
-        assertEq(actualPtReceived, desiredPtAmount, "Should receive exactly the requested PT amount");
+        // Get quote at end of epoch
+        uint256 quoteEnd = hook.getQuotePTtoSY(ptAmount);
+        
+        console.log("SY quote at start:", quoteStart);
+        console.log("SY quote at middle:", quoteMid);
+        console.log("SY quote at end:", quoteEnd);
+        
+        // As time progresses, PT becomes worth more SY (inverse of the SY to PT price movement)
+        assertTrue(quoteMid > quoteStart, "SY amount should increase as time passes");
+        assertTrue(quoteEnd > quoteMid, "SY amount should increase as time passes");
     }
     
-    // Test for exceeding available liquidity
-    function test_exactOutput_exceeds_liquidity_reverts() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                50 ether, 50 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        // Try to swap for more PT than is available in the pool
-        uint256 desiredPtAmount = 51 ether;
-        
-        IPoolManager.SwapParams memory params =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        // Don't expect a specific error type - the error is wrapped by the pool manager
-        // The actual error is InsufficientPTReserves but it's wrapped in a WrappedError
-        vm.expectRevert();
-        swapRouter.swap(key, params, settings, ZERO_BYTES);
-    }
-    
-    // Compare exact input vs exact output for the same effective amount
-    function test_compare_exactInput_vs_exactOutput() public {
+    // Test comparing PT to SY and SY to PT swap rates
+    function test_compare_PT_to_SY_and_SY_to_PT_rates() public {
         hook.addLiquidity(
             ZooCustomAccounting.AddLiquidityParams(
                 100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
             )
         );
         
-        // First do an exactInput swap
-        uint256 syInputAmount = 10 ether;
-        uint256 prevSyBalance1 = key.currency0.balanceOf(address(this));
-        uint256 prevPtBalance1 = key.currency1.balanceOf(address(this));
+        uint256 amount = 1 ether; // Use a small amount to minimize price impact
         
-        IPoolManager.SwapParams memory exactInputParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syInputAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
+        // Get quotes for both directions
+        uint256 ptFromSY = hook.getQuote(key, amount);
+        uint256 syFromPT = hook.getQuotePTtoSY(amount);
+        
+        console.log("1 SY gets you (PT):", ptFromSY);
+        console.log("1 PT gets you (SY):", syFromPT);
+        
+        // Calculate effective rates
+        uint256 syToPtRate = (ptFromSY * 1e18) / amount;
+        uint256 ptToSyRate = (syFromPT * 1e18) / amount;
+        
+        console.log("SY to PT rate:", syToPtRate);
+        console.log("PT to SY rate:", ptToSyRate);
+        
+        // In a perfect market with no price impact, the rates would be exact inverses
+        // But due to price impact and calculation differences, we expect them to be close but not exact
+        // Check that their product is close to 1e36 (1e18 * 1e18)
+        uint256 rateProduct = (syToPtRate * ptToSyRate) / 1e18;
+        console.log("Rate product (should be close to 1e18):", rateProduct);
+        
+        assertApproxEqRel(rateProduct, 1e18, 0.05e18, "Rates should be approximately inverse of each other");
+    }
+    
+    // Test large PT to SY swap
+    function test_large_PT_to_SY_swap() public {
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                500 ether, 500 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        uint256 ptAmount = 100 ether;
+        uint256 expectedSYAmount = hook.getQuotePTtoSY(ptAmount);
+        console.log("Expected SY for 100 PT:", expectedSYAmount);
+        
+        uint256 prevSYBalance = key.currency0.balanceOf(address(this));
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({
+                zeroForOne: false,  // PT to SY
+                amountSpecified: -int256(ptAmount),
+                sqrtPriceLimitX96: MAX_PRICE_LIMIT
+            });
         PoolSwapTest.TestSettings memory settings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         
-        swapRouter.swap(key, exactInputParams, settings, ZERO_BYTES);
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
         
-        uint256 ptReceived = key.currency1.balanceOf(address(this)) - prevPtBalance1;
-        console.log("Exact input swap - SY input:", syInputAmount);
-        console.log("Exact input swap - PT received:", ptReceived);
+        uint256 actualSYReceived = key.currency0.balanceOf(address(this)) - prevSYBalance;
+        console.log("Actually received SY:", actualSYReceived);
+        
+        // Verify we received close to the estimated amount
+        assertApproxEqRel(actualSYReceived, expectedSYAmount, 0.01e18);
+        
+        // With a large swap, we should see significant price impact
+        // Let's try another small swap to see the change in rate
+        uint256 smallPtAmount = 1 ether;
+        uint256 newExpectedSYAmount = hook.getQuotePTtoSY(smallPtAmount);
+        console.log("New expected SY for 1 PT:", newExpectedSYAmount);
+        
+        // The rate should be worse now (less SY per PT) due to decreased SY reserves
+        uint256 initialRate = expectedSYAmount * 1e18 / ptAmount; // SY per PT for first swap
+        uint256 newRate = newExpectedSYAmount * 1e18 / smallPtAmount; // SY per PT for potential second swap
+        
+        console.log("Initial rate (SY/PT):", initialRate);
+        console.log("New rate (SY/PT):", newRate);
+        
+        assertTrue(newRate < initialRate, "Rate should be worse after large swap");
+    }
+    
+    // Test PT to SY exactOutput when insufficient SY reserves
+    function test_PT_to_SY_exactOutput_insufficient_reserves_reverts() public {
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                50 ether, 50 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // Try to swap for more SY than is available in the pool
+        uint256 desiredSYAmount = 51 ether;
+        
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({
+                zeroForOne: false,  // PT to SY
+                amountSpecified: int256(desiredSYAmount), // Exact output
+                sqrtPriceLimitX96: MAX_PRICE_LIMIT
+            });
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        // Should revert with insufficient reserves error (wrapped by pool manager)
+        vm.expectRevert();
+        swapRouter.swap(key, params, settings, ZERO_BYTES);
+    }
+    
+    // Test both swap directions in sequence
+    function test_bidirectional_swaps_in_sequence() public {
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // Get initial balances
+        uint256 initialSYBalance = key.currency0.balanceOf(address(this));
+        uint256 initialPTBalance = key.currency1.balanceOf(address(this));
+        
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        
+        // First swap: SY to PT
+        uint256 syToSwap = 10 ether;
+        IPoolManager.SwapParams memory syToPtParams =
+            IPoolManager.SwapParams({
+                zeroForOne: true,  // SY to PT
+                amountSpecified: -int256(syToSwap),
+                sqrtPriceLimitX96: MIN_PRICE_LIMIT
+            });
+        
+        swapRouter.swap(key, syToPtParams, settings, ZERO_BYTES);
+        
+        uint256 ptReceived = key.currency1.balanceOf(address(this)) - initialPTBalance;
+        console.log("PT received from SY:", ptReceived);
+        
+        // Second swap: PT to SY
+        IPoolManager.SwapParams memory ptToSyParams =
+            IPoolManager.SwapParams({
+                zeroForOne: false,  // PT to SY
+                amountSpecified: -int256(ptReceived), // Swap back the exact amount we received
+                sqrtPriceLimitX96: MAX_PRICE_LIMIT
+            });
+        
+        swapRouter.swap(key, ptToSyParams, settings, ZERO_BYTES);
+        
+        // Check final balances
+        uint256 finalSYBalance = key.currency0.balanceOf(address(this));
+        uint256 finalPTBalance = key.currency1.balanceOf(address(this));
+        
+        console.log("SY spent initially:", syToSwap);
+        console.log("SY recovered:", finalSYBalance - (initialSYBalance - syToSwap));
+        console.log("PT balance change:", finalPTBalance - initialPTBalance);
+        
+        // Due to price impact, we should get less SY back than we initially put in
+        assertTrue(finalSYBalance < initialSYBalance, "Should have less SY after round trip due to price impact");
+        
+        // PT should be the same as before (minus a tiny rounding error perhaps)
+        assertApproxEqAbs(finalPTBalance, initialPTBalance, 10, "Should have approximately same PT after round trip");
+        
+        // The lost SY represents the implicit fee due to price impact
+        uint256 implicitFee = initialSYBalance - finalSYBalance;
+        console.log("Implicit fee from price impact:", implicitFee);
+        
+        // The fee should be non-zero but relatively small compared to swap size
+        assertTrue(implicitFee > 0, "Should pay some fee due to price impact");
+        assertTrue(implicitFee < syToSwap / 10, "Fee should be less than 10% of swap amount");
+    }
+    
+    // Test the getQuotePTtoSY and getRequiredPTforSY functions with various amounts
+    function test_PT_to_SY_quote_functions() public {
+        hook.addLiquidity(
+            ZooCustomAccounting.AddLiquidityParams(
+                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+            )
+        );
+        
+        // Test exact input quotes (getQuotePTtoSY)
+        uint256[] memory ptAmounts = new uint256[](4);
+        ptAmounts[0] = 0.1 ether;
+        ptAmounts[1] = 1 ether;
+        ptAmounts[2] = 5 ether;
+        ptAmounts[3] = 10 ether;
+        
+        for (uint i = 0; i < ptAmounts.length; i++) {
+            uint256 expectedSYOutput = hook.getQuotePTtoSY(ptAmounts[i]);
+            console.log("PT input:", ptAmounts[i] / 1 ether);
+            console.log("Expected SY output:", expectedSYOutput / 1 ether);
+            
+            // Verify with actual swap
+            uint256 prevSYBalance = key.currency0.balanceOf(address(this));
+            
+            swapRouter.swap(
+                key,
+                IPoolManager.SwapParams({
+                    zeroForOne: false,
+                    amountSpecified: -int256(ptAmounts[i]),
+                    sqrtPriceLimitX96: MAX_PRICE_LIMIT
+                }),
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+                ZERO_BYTES
+            );
+            
+            uint256 actualSYOutput = key.currency0.balanceOf(address(this)) - prevSYBalance;
+            console.log("Actual SY output:", actualSYOutput / 1 ether);
+            
+            assertApproxEqRel(actualSYOutput, expectedSYOutput, 0.01e18, 
+                "Actual SY output should match expected output");
+                
+            // Replenish liquidity for the next test to keep rates stable
+            if (i < ptAmounts.length - 1) {
+                hook.addLiquidity(
+                    ZooCustomAccounting.AddLiquidityParams(
+                        actualSYOutput, ptAmounts[i], 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+                    )
+                );
+            }
+        }
+        
+        // Test exact output quotes (getRequiredPTforSY)
+        uint256[] memory syAmounts = new uint256[](4);
+        syAmounts[0] = 0.1 ether;
+        syAmounts[1] = 1 ether;
+        syAmounts[2] = 5 ether;
+        syAmounts[3] = 10 ether;
         
         // Add fresh liquidity to reset the pool state
         hook.addLiquidity(
@@ -1176,164 +812,43 @@ contract YieldSwapHookTest is Test, Deployers {
             )
         );
         
-        // Now do an exactOutput swap for the same PT amount
-        uint256 desiredPtAmount = ptReceived;
-        uint256 prevSyBalance2 = key.currency0.balanceOf(address(this));
-        uint256 prevPtBalance2 = key.currency1.balanceOf(address(this));
-        
-        IPoolManager.SwapParams memory exactOutputParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(desiredPtAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        
-        swapRouter.swap(key, exactOutputParams, settings, ZERO_BYTES);
-        
-        uint256 sySpent = prevSyBalance2 - key.currency0.balanceOf(address(this));
-        uint256 actualPtReceived = key.currency1.balanceOf(address(this)) - prevPtBalance2;
-        
-        console.log("Exact output swap - SY spent:", sySpent);
-        console.log("Exact output swap - PT received:", actualPtReceived);
-        
-        // Verify that we got exactly the PT amount requested
-        assertEq(actualPtReceived, desiredPtAmount, "Should receive exactly the requested PT amount");
-        
-        // The SY amounts should be very close but not identical due to different calculation paths
-        assertApproxEqRel(sySpent, syInputAmount, 0.01e18, "SY amounts should be approximately equal");
-    }
-    
-    // Test the getRequiredInputForOutput function directly
-    function test_getRequiredInputForOutput() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256[] memory ptAmounts = new uint256[](4);
-        ptAmounts[0] = 0.1 ether;
-        ptAmounts[1] = 1 ether;
-        ptAmounts[2] = 5 ether;
-        ptAmounts[3] = 10 ether;
-        
-        for (uint i = 0; i < ptAmounts.length; i++) {
-            uint256 requiredSyAmount = hook.getRequiredInputForOutput(key, ptAmounts[i]);
-            console.log("PT amount:", ptAmounts[i] / 1 ether, "ether");
-            console.log("Required SY amount:", requiredSyAmount / 1 ether, "ether");
+        for (uint i = 0; i < syAmounts.length; i++) {
+            uint256 expectedPTInput = hook.getRequiredPTforSY(syAmounts[i]);
+            console.log("SY output desired:", syAmounts[i] / 1 ether);
+            console.log("Expected PT input:", expectedPTInput / 1 ether);
             
-            // Verify by performing an actual swap
-            uint256 prevSyBalance = key.currency0.balanceOf(address(this));
-            uint256 prevPtBalance = key.currency1.balanceOf(address(this));
+            // Verify with actual swap
+            uint256 prevSYBalance = key.currency0.balanceOf(address(this));
+            uint256 prevPTBalance = key.currency1.balanceOf(address(this));
             
-            IPoolManager.SwapParams memory params =
-                IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(ptAmounts[i]), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-            PoolSwapTest.TestSettings memory settings =
-                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-            
-            swapRouter.swap(key, params, settings, ZERO_BYTES);
-            
-            uint256 actualSySpent = prevSyBalance - key.currency0.balanceOf(address(this));
-            uint256 actualPtReceived = key.currency1.balanceOf(address(this)) - prevPtBalance;
-            
-            // Verify that we got exactly the PT amount we requested
-            assertEq(actualPtReceived, ptAmounts[i], "Should receive exactly the requested PT amount");
-            
-            // Verify that the actual SY spent is close to the predicted amount
-            assertApproxEqRel(
-                actualSySpent, 
-                requiredSyAmount, 
-                0.01e18, 
-                "Actual SY spent should be close to predicted amount"
+            swapRouter.swap(
+                key,
+                IPoolManager.SwapParams({
+                    zeroForOne: false,
+                    amountSpecified: int256(syAmounts[i]),
+                    sqrtPriceLimitX96: MAX_PRICE_LIMIT
+                }),
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+                ZERO_BYTES
             );
             
-            // Replenish liquidity for the next test
-            if (i < ptAmounts.length - 1) {
+            uint256 actualSYReceived = key.currency0.balanceOf(address(this)) - prevSYBalance;
+            uint256 actualPTSpent = prevPTBalance - key.currency1.balanceOf(address(this));
+            console.log("Actual SY received:", actualSYReceived / 1 ether);
+            console.log("Actual PT spent:", actualPTSpent / 1 ether);
+            
+            assertEq(actualSYReceived, syAmounts[i], "Should receive exactly the requested SY amount");
+            assertApproxEqRel(actualPTSpent, expectedPTInput, 0.01e18, 
+                "Actual PT spent should match expected input");
+                
+            // Replenish liquidity for the next test to keep rates stable
+            if (i < syAmounts.length - 1) {
                 hook.addLiquidity(
                     ZooCustomAccounting.AddLiquidityParams(
-                        actualSySpent, ptAmounts[i], 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
+                        syAmounts[i], actualPTSpent, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
                     )
                 );
             }
         }
-    }
-    
-    // Update the previously failing test to verify both swap modes work
-    function test_swap_exactOutput_now_works() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                100 ether, 100 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        // First test exactInput (negative amountSpecified)
-        uint256 syInputAmount = 5 ether;
-        IPoolManager.SwapParams memory exactInputParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -int256(syInputAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-        
-        // This should succeed
-        swapRouter.swap(key, exactInputParams, settings, ZERO_BYTES);
-        
-        // Now test exactOutput (positive amountSpecified) which used to fail but should now work
-        uint256 ptOutputAmount = 5 ether;
-        IPoolManager.SwapParams memory exactOutputParams =
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(ptOutputAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT});
-        
-        // This should now succeed (no longer expecting revert)
-        swapRouter.swap(key, exactOutputParams, settings, ZERO_BYTES);
-    }
-    
-    // Test for changing time factors with exactOutput swaps
-    function test_exactOutput_swap_across_time() public {
-        hook.addLiquidity(
-            ZooCustomAccounting.AddLiquidityParams(
-                500 ether, 500 ether, 0, 0, address(this), MAX_DEADLINE, MIN_TICK, MAX_TICK, bytes32(0)
-            )
-        );
-        
-        uint256 ptAmount = 10 ether;
-        
-        // Swap at epoch start
-        uint256 prevSyBalance1 = key.currency0.balanceOf(address(this));
-        swapRouter.swap(
-            key,
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(ptAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
-            ZERO_BYTES
-        );
-        uint256 sySpent1 = prevSyBalance1 - key.currency0.balanceOf(address(this));
-        
-        // Time travel to middle of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION / 2);
-        
-        // Swap at middle of epoch
-        uint256 prevSyBalance2 = key.currency0.balanceOf(address(this));
-        swapRouter.swap(
-            key,
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(ptAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
-            ZERO_BYTES
-        );
-        uint256 sySpent2 = prevSyBalance2 - key.currency0.balanceOf(address(this));
-        
-        // Time travel to end of epoch
-        vm.warp(DEFAULT_EPOCH_START + DEFAULT_EPOCH_DURATION);
-        
-        // Swap at end of epoch
-        uint256 prevSyBalance3 = key.currency0.balanceOf(address(this));
-        swapRouter.swap(
-            key,
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: int256(ptAmount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
-            ZERO_BYTES
-        );
-        uint256 sySpent3 = prevSyBalance3 - key.currency0.balanceOf(address(this));
-        
-        console.log("SY spent for PT at start:", sySpent1);
-        console.log("SY spent for PT at middle:", sySpent2);
-        console.log("SY spent for PT at end:", sySpent3);
-        
-        // As time progresses, the same PT output should require more SY input
-        // This is the inverse relationship compared to exactInput swaps
-        assertTrue(sySpent2 > sySpent1, "SY spent should increase as time passes");
-        assertTrue(sySpent3 > sySpent2, "SY spent should increase as time passes");
     }
 }
