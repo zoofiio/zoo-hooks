@@ -21,8 +21,8 @@ contract AddInitialLiquidity is Script {
     
     // Constants for liquidity provision
     uint256 public constant MINT_AMOUNT = 1_000_000 ether;
-    uint256 public constant SY_LIQUIDITY = 60_000 ether;
-    uint256 public constant PT_LIQUIDITY = 40_000 ether;
+    uint256 public constant SY_LIQUIDITY = 100_000 ether;
+    uint256 public constant PT_LIQUIDITY = 90_000 ether;
     
     // Pool parameters
     int24 public constant MIN_TICK = -887220;

@@ -25,8 +25,8 @@ contract SwapTokens is Script {
     using stdJson for string;
     using CurrencyLibrary for Currency;
     
-    // Swap amount - 100 SY tokens
-    uint256 public constant SWAP_AMOUNT = 100 ether;
+    // Swap amount - 10 SY tokens
+    uint256 public constant SWAP_AMOUNT = 10 ether;
     
     // Pool parameters (must match those used in AddInitialLiquidity)
     uint24 public constant FEE = 3000; // 0.3% fee tier
@@ -51,7 +51,7 @@ contract SwapTokens is Script {
     
     function loadDeployment() internal {
         // Always use arbitrum network for this script
-        network = "arbitrum";
+        network = vm.envOr("NETWORK", string("sepolia"));
         string memory deploymentPath = getDeploymentPath(network);
         
         // Try to read deployment file
