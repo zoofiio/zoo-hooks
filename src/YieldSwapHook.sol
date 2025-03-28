@@ -57,7 +57,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     error InvalidHookConfiguration();
     error MathError();
     error InsufficientPTReserves();
-    error ExactInputOnly();
+    error InsufficientSYReserves();
     error InsufficientLiquidity();
     error InvalidEpochParameters();
     
@@ -122,10 +122,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         uint256 denominator = 1e18 - portionPT;
 
         // Calculate the log term
-        int256 logTerm = this.calculateLogTerm(numerator, denominator);
-        console.log("YieldSwapHook: calculatePrice, ln(numerator): ", numerator * 1e18, MathLibrary.ln(numerator * 1e18));
-        console.log("YieldSwapHook: calculatePrice, ln(denominator): ", denominator * 1e18, MathLibrary.ln(denominator * 1e18));
-        console.log("YieldSwapHook: calculatePrice, logTerm: ", logTerm);
+        int256 logTerm = int256(MathLibrary.ln(numerator * 1e18)) - int256(MathLibrary.ln(denominator * 1e18));
         
         // The first component: (t / SCALAR_ROOT) * logTerm
         int256 firstComponent;
@@ -142,15 +139,6 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         return firstComponent + secondComponent;
     }
 
-    /**
-     * @notice External function to safely calculate log term
-     * @dev Made external to use try/catch for error handling
-     */
-    function calculateLogTerm(uint256 numerator, uint256 denominator) external pure returns (int256) {
-        int256 logTerm = int256(MathLibrary.ln(numerator * 1e18)) - int256(MathLibrary.ln(denominator * 1e18));
-        return logTerm;
-    }
-    
     // Externally visible helper function to get reserves for testing
     function getReserves(PoolKey calldata /* key */) external view returns (uint256 reserve0, uint256 reserve1) {
         return (reserveSY, reservePT);
@@ -173,7 +161,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
 
     /**
      * @notice Implementation of BaseCustomCurve's _getUnspecifiedAmount
-     * @dev Only supports exact input swaps (amountSpecified < 0)ot - 1) * t + 1
+     * @dev Supports both exact input (amountSpecified < 0) and exact output (amountSpecified > 0) swaps
      */
     function _getUnspecifiedAmount(IPoolManager.SwapParams calldata params)
         internal
@@ -181,16 +169,17 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         override
         returns (uint256 unspecifiedAmount)
     {
-        // Check for exact input vs exact output first
-        if (params.amountSpecified >= 0) {
-            revert ExactInputOnly();
-        }
-        
         // Then check swap direction
         if (params.zeroForOne) {
-            // Get absolute value of input amount
-            uint256 amountIn = uint256(-params.amountSpecified);
-            return _getAmountOutFromExactInput(amountIn, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+            if (params.amountSpecified < 0) {
+                // Exact input SY -> PT swap
+                uint256 amountIn = uint256(-params.amountSpecified);
+                return _getAmountOutFromExactInput(amountIn, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+            } else {
+                // Exact output SY -> PT swap
+                uint256 amountOut = uint256(params.amountSpecified);
+                return _getAmountInForExactOutput(amountOut, poolKey.currency0, poolKey.currency1, params.zeroForOne);
+            }
         } else {
             // For PT to SY swaps (zeroForOne = false) - not supported in our model
             revert OnlySYToPTSwapsSupported();
@@ -265,16 +254,106 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     
     /**
      * @notice Calculate input amount (SY) needed for exact output amount (PT)
-     * @dev Not used due to exactInput only restriction
+     * @dev Used for exactOutput swaps where user specifies exact PT amount to receive
      */
     function _getAmountInForExactOutput(
-        uint256 /* amountOut */,
+        uint256 amountOut,
         Currency /* input */,
         Currency /* output */,
-        bool /* zeroForOne */
-    ) internal view virtual returns (uint256 /* amountIn */) {
-        // This function won't be called since we restrict to exactInput only
-        revert ExactInputOnly();
+        bool zeroForOne
+    ) internal view virtual returns (uint256 amountIn) {
+        // In our model, we only support SY to PT swaps (zeroForOne = true)
+        if (!zeroForOne) revert OnlySYToPTSwapsSupported();
+        
+        // Instead of checking initialized, check if poolKey is set
+        if (Currency.unwrap(poolKey.currency0) == address(0)) revert PoolNotInitialized();
+        
+        // Ensure there's enough PT in the pool
+        if (amountOut > reservePT) revert InsufficientPTReserves();
+        
+        // Use our tracked reserves
+        uint256 reserve0 = reserveSY;
+        uint256 reserve1 = reservePT;
+        
+        uint256 totalReserve = reserve0 + reserve1;
+        if (totalReserve == 0) revert InvalidHookConfiguration();
+        
+        // Calculate portion_PT before swap using mulDiv for safety
+        uint256 portionPTBefore = FullMath.mulDiv(reserve1, 1e18, totalReserve);
+        
+        // Calculate Price_SY_Before using current time-based parameters
+        int256 priceSYBefore = calculatePrice(portionPTBefore);
+        
+        // Calculate reserves after swap
+        uint256 reserve1After = reserve1 - amountOut;
+        
+        // Initial estimate for amountIn using price before swap
+        // Note: This is just an initial approximation
+        uint256 initialAmountIn;
+        if (priceSYBefore > 0) {
+            initialAmountIn = FullMath.mulDiv(amountOut, 1e18, uint256(priceSYBefore));
+        } else {
+            // If price is non-positive (unusual but possible), set a high estimate
+            initialAmountIn = FullMath.mulDiv(amountOut, 2e18, 1); // 2x ratio as starting point
+        }
+        
+        // Iterative binary search to find the exact input amount
+        // This approach works better than a direct formula for complex pricing functions
+        uint256 low = 0;
+        uint256 high = initialAmountIn * 2; // Start with 2x the initial estimate as upper bound
+        uint256 maxIterations = 32; // Limit iterations for gas efficiency
+        
+        for (uint256 i = 0; i < maxIterations; i++) {
+            // Calculate mid point
+            uint256 mid = (low + high) / 2;
+            
+            // Skip calculation if low and high converged
+            if (mid == low || mid == high) {
+                amountIn = high; // Choose the higher value to ensure enough input
+                break;
+            }
+            
+            // Calculate output for the current mid input
+            // Use current reserves + mid as the new state
+            uint256 reserve0Test = reserve0 + mid;
+            uint256 totalReserveTest = reserve0Test + reserve1;
+            uint256 portionPTTest = FullMath.mulDiv(reserve1, 1e18, totalReserveTest);
+            int256 priceTest = calculatePrice(portionPTTest);
+            
+            uint256 outputTest;
+            if (priceTest > 0) {
+                outputTest = FullMath.mulDiv(mid, uint256(priceTest), 1e18);
+            } else {
+                outputTest = 0;
+            }
+            
+            // Adjust search bounds based on result
+            if (outputTest < amountOut) {
+                // Need more input
+                low = mid;
+            } else {
+                // Too much input
+                high = mid;
+                
+                // If we found a valid solution, remember it
+                if (outputTest >= amountOut) {
+                    amountIn = mid;
+                }
+            }
+        }
+        
+        // Final check - make sure we have a valid amountIn
+        if (amountIn == 0) {
+            // Fallback to a conservative estimate if binary search failed
+            if (priceSYBefore > 0) {
+                amountIn = FullMath.mulDiv(amountOut, 12e17, uint256(priceSYBefore)); // 1.2x to be safe
+            } else {
+                // Extremely conservative estimate for unusual price situations
+                amountIn = amountOut * 3; // 3x as a fallback
+            }
+        }
+        
+        return amountIn;
     }
     
     /**
@@ -343,33 +422,46 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
             revert OnlySYToPTSwapsSupported();
         }
         
-        // Only support exactInput swaps - check this before calculating anything
-        // Skip super._beforeSwap entirely for exactOutput swaps
-        if (params.amountSpecified >= 0) {
-            revert ExactInputOnly();
+        // Handle both exactInput and exactOutput swaps
+        if (params.amountSpecified < 0) {
+            // Exact input swap (SY -> PT)
+            uint256 specifiedAmount = uint256(-params.amountSpecified);
+            uint256 unspecifiedAmount = _getAmountOutFromExactInput(
+                specifiedAmount, 
+                poolKey.currency0,
+                poolKey.currency1,
+                params.zeroForOne
+            );
+            
+            // Call parent implementation to handle token settlement
+            (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+            
+            // Update our reserves after parent implementation
+            reserveSY += specifiedAmount;
+            reservePT -= unspecifiedAmount;
+            
+            emit ReservesUpdated(reserveSY, reservePT);
+            return (selector, delta, fee);
+        } else {
+            // Exact output swap (SY -> PT)
+            uint256 specifiedAmount = uint256(params.amountSpecified);
+            uint256 unspecifiedAmount = _getAmountInForExactOutput(
+                specifiedAmount, 
+                poolKey.currency0,
+                poolKey.currency1,
+                params.zeroForOne
+            );
+            
+            // Call parent implementation to handle token settlement
+            (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
+            
+            // Update our reserves after parent implementation
+            reserveSY += unspecifiedAmount;
+            reservePT -= specifiedAmount;
+            
+            emit ReservesUpdated(reserveSY, reservePT);
+            return (selector, delta, fee);
         }
-        
-        // Get absolute value of input amount (SY)
-        uint256 specifiedAmount = uint256(-params.amountSpecified);
-        
-        // Calculate output amount (PT) before calling super._beforeSwap
-        uint256 unspecifiedAmount = _getAmountOutFromExactInput(
-            specifiedAmount,
-            poolKey.currency0,
-            poolKey.currency1,
-            params.zeroForOne
-        );
-        
-        // Call parent implementation to handle token settlement
-        (bytes4 selector, BeforeSwapDelta delta, uint24 fee) = super._beforeSwap(sender, key, params, hookData);
-        
-        // Update our reserves after parent implementation
-        reserveSY += specifiedAmount;
-        reservePT -= unspecifiedAmount;
-        
-        emit ReservesUpdated(reserveSY, reservePT);
-        
-        return (selector, delta, fee);
     }
     
     /**
@@ -431,7 +523,7 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
     }
     
     /**
-     * @notice Get PT quote for a specific SY amount
+     * @notice Get PT quote for a specific SY amount (exactInput)
      * @param key The pool key
      * @param sYAmount Amount of SY tokens to swap
      * @return ptAmount Estimated PT tokens to receive
@@ -440,4 +532,13 @@ contract YieldSwapHook is ProtocolOwner, ZooCustomCurve, ERC20 {
         return _getAmountOutFromExactInput(sYAmount, key.currency0, key.currency1, true);
     }
     
+    /**
+     * @notice Get SY amount required for a specific PT amount (exactOutput)
+     * @param key The pool key
+     * @param ptAmount Desired amount of PT tokens to receive
+     * @return syAmount Required SY tokens to provide
+     */
+    function getRequiredInputForOutput(PoolKey calldata key, uint256 ptAmount) external view returns (uint256 syAmount) {
+        return _getAmountInForExactOutput(ptAmount, key.currency0, key.currency1, true);
+    }
 }
